@@ -40,3 +40,12 @@ http://localhost:5173/?room=galinheiro&name=Bruno
 ```bash
 npm run build
 ```
+
+## GitHub Pages
+
+Na branch `open-info`, o Pages deve usar `GitHub Actions`, nao `Branch / root`.
+
+Motivo:
+- `index.html` no root e codigo-fonte do Vite;
+- o Pages em `branch + root` serve esse fonte cru e tenta abrir `/src/main.ts`, o que quebra em repositorio publicado em subpasta;
+- o workflow em [.github/workflows/deploy-open-info-pages.yml](/home/zorro/Documents/www/vibi-maze/.github/workflows/deploy-open-info-pages.yml) faz o build e publica o `dist` correto.
