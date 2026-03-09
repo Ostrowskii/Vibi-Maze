@@ -1,33 +1,32 @@
 # Vibi-Maze
 
-Jogo multiplayer com `room + nome`, mestre fixo, editor de labirinto e partida por turnos entre raposa e galinhas.
+Branch `open-info`: as informacoes completas do jogo ficam abertas no stream compartilhado do `vibinet`, mas a UI continua mostrando a visao limitada para jogadores vivos.
 
 ## O que esta implementado
 
 - entrada por `room` e `nome`;
-- lobby com eleição de mestre;
+- lobby com eleicao de mestre;
 - editor livre do mestre com salas, corredores, loop e mapa default 3x3;
 - escolha ou sorteio da raposa;
-- jogo por turnos com visão limitada por sala;
+- jogo por turnos com visao limitada na interface;
 - trilho lateral para acompanhar as telas dos jogadores;
 - espectador total para mortes e entradas tardias;
-- relay websocket próprio com reconexão por `nome + room`.
+- sincronizacao via `vibinet`, usando o endpoint oficial por padrao.
 
 ## Rodando
 
 ```bash
 npm install
-npm run server
 npm run dev
 ```
 
-O cliente assume por padrão o relay local em `ws://127.0.0.1:8787`.
+Por padrao o cliente usa o servidor oficial do `vibinet`.
 
-### Query params úteis
+### Query params uteis
 
 - `?room=minha-sala`
 - `?name=Ana`
-- `?server=ws://127.0.0.1:8787`
+- `?server=wss://seu-servidor`
 
 Exemplo:
 

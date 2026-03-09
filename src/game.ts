@@ -1,17 +1,33 @@
 import type {
+  ActionRequest,
   Corridor,
   ExitInfo,
   FullGameState,
   FullPlayerState,
   MazeRoom,
+  NetPost,
   PlayerRole,
   Presence,
   PublicState,
   RoomType,
+  RoomSync,
   SeatType,
+  TransportPlayer,
+  TransportState,
 } from "./protocol";
 
 const DEFAULT_ROOM_SIZE = 220;
+const PRESENCE_COLORS = [
+  "#f25f5c",
+  "#247ba0",
+  "#70c1b3",
+  "#f7b267",
+  "#8e6c88",
+  "#5c80bc",
+  "#9bc53d",
+  "#f18f01",
+];
+const HEARTBEAT_GRACE_TICKS = 24;
 
 function room_id(index: number): string {
   return `room-${index}`;
@@ -35,6 +51,239 @@ export function normalize_name(raw: string): string {
 
 export function normalize_room(raw: string): string {
   return raw.trim().replace(/\s+/g, "-").slice(0, 36).toLowerCase();
+}
+
+export function encode_transport_post(post: NetPost): string {
+  return JSON.stringify(post);
+}
+
+export function create_transport_state(): TransportState {
+  return {
+    phase: "lobby",
+    masterName: null,
+    roster: {},
+    publicState: null,
+    fullState: null,
+    actionRequests: [],
+    consumedActionIds: [],
+    message: null,
+    clockTick: 0,
+    nextJoinOrder: 0,
+  };
+}
+
+export function tick_transport_state(state: TransportState): TransportState {
+  return {
+    ...state,
+    clockTick: state.clockTick + 1,
+  };
+}
+
+export function apply_transport_post(raw: string, state: TransportState): TransportState {
+  let post: NetPost;
+  try {
+    post = JSON.parse(raw) as NetPost;
+  } catch {
+    return state;
+  }
+
+  switch (post.$) {
+    case "join_room":
+      return handle_join_post(state, post);
+    case "heartbeat":
+      return handle_heartbeat_post(state, post);
+    case "claim_master":
+      return handle_claim_master_post(state, post);
+    case "publish_state":
+      return handle_publish_state_post(state, post);
+    case "submit_move":
+      return handle_action_request_post(state, {
+        id: post.requestId,
+        type: "move",
+        actorName: post.actorName,
+        corridorId: post.corridorId,
+      }, post.name, post.sessionId);
+    case "select_kill_target":
+      return handle_action_request_post(state, {
+        id: post.requestId,
+        type: "kill",
+        actorName: post.actorName,
+        targetName: post.targetName,
+      }, post.name, post.sessionId);
+    default:
+      return state;
+  }
+}
+
+export function derive_room_sync(room: string, selfName: string, state: TransportState): RoomSync {
+  const consumed = new Set(state.consumedActionIds);
+  const players = Object.values(state.roster)
+    .sort((left, right) => left.joinedAt - right.joinedAt)
+    .map((player) => {
+      const synced = state.fullState?.players[player.name];
+      const isMaster = state.masterName === player.name;
+      const seat = synced?.seat ?? player.seat;
+      const role = synced?.role ?? (isMaster ? "master" : seat === "spectator" ? "spectator" : "player");
+      return {
+        name: player.name,
+        color: synced?.color ?? player.color,
+        joinedAt: synced?.joinedAt ?? player.joinedAt,
+        connected: is_transport_player_connected(state, player),
+        seat,
+        isMaster,
+        role,
+        alive: synced?.alive ?? false,
+      };
+    });
+
+  const self = players.find((player) => player.name === selfName) ?? null;
+  const pendingActions = state.actionRequests.filter((action) => !consumed.has(action.id));
+
+  return {
+    room,
+    selfName,
+    phase: state.phase,
+    masterName: state.masterName,
+    players,
+    publicState: state.publicState,
+    fullState: state.fullState,
+    canClaimMaster: state.phase === "lobby" && !state.masterName && self?.seat !== "spectator",
+    canBecomeMaster: false,
+    swapMode: "none",
+    swapVotes: [],
+    eligibleNames: [],
+    message: state.message,
+    pendingActions,
+  };
+}
+
+function handle_join_post(state: TransportState, post: Extract<NetPost, { $: "join_room" }>): TransportState {
+  const next = clone_state(state);
+  const existing = next.roster[post.name];
+
+  if (existing) {
+    existing.activeSessionId = post.sessionId;
+    existing.lastSeenTick = next.clockTick;
+    next.message = null;
+    return next;
+  }
+
+  const joinedAt = next.nextJoinOrder + 1;
+  const player: TransportPlayer = {
+    name: post.name,
+    color: PRESENCE_COLORS[next.nextJoinOrder % PRESENCE_COLORS.length] ?? PRESENCE_COLORS[0],
+    joinedAt,
+    seat: next.phase === "lobby" ? "participant" : "spectator",
+    activeSessionId: post.sessionId,
+    lastSeenTick: next.clockTick,
+  };
+
+  next.nextJoinOrder += 1;
+  next.roster[player.name] = player;
+  next.message = next.phase === "lobby" ? null : "Partida em andamento. Novo ingresso como espectador.";
+  return next;
+}
+
+function handle_heartbeat_post(state: TransportState, post: Extract<NetPost, { $: "heartbeat" }>): TransportState {
+  if (!is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+
+  const next = clone_state(state);
+  const player = next.roster[post.name];
+  if (!player) {
+    return state;
+  }
+  player.lastSeenTick = next.clockTick;
+  return next;
+}
+
+function handle_claim_master_post(state: TransportState, post: Extract<NetPost, { $: "claim_master" }>): TransportState {
+  if (state.phase !== "lobby" || state.masterName || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+
+  const next = clone_state(state);
+  next.masterName = post.name;
+  next.message = `${post.name} virou mestre.`;
+  return next;
+}
+
+function handle_publish_state_post(state: TransportState, post: Extract<NetPost, { $: "publish_state" }>): TransportState {
+  if (state.masterName !== post.name || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+
+  const next = clone_state(state);
+  next.fullState = clone_state(post.fullState);
+  next.publicState = clone_state(post.publicState);
+  next.phase = post.fullState.phase;
+  next.masterName = post.fullState.masterName ?? next.masterName;
+  next.message = null;
+
+  const consumed = new Set(next.consumedActionIds);
+  for (const actionId of post.consumedActionIds) {
+    consumed.add(actionId);
+  }
+  next.consumedActionIds = [...consumed].slice(-256);
+  next.actionRequests = next.actionRequests.filter((action) => !consumed.has(action.id));
+
+  if (next.phase === "lobby") {
+    next.actionRequests = [];
+    next.consumedActionIds = [];
+  }
+
+  for (const fullPlayer of Object.values(next.fullState.players)) {
+    const rosterPlayer = next.roster[fullPlayer.name] ?? {
+      name: fullPlayer.name,
+      color: fullPlayer.color,
+      joinedAt: fullPlayer.joinedAt,
+      seat: fullPlayer.seat,
+      activeSessionId: null,
+      lastSeenTick: -99999,
+    };
+
+    rosterPlayer.color = fullPlayer.color;
+    rosterPlayer.joinedAt = fullPlayer.joinedAt;
+    rosterPlayer.seat = fullPlayer.seat;
+    next.roster[fullPlayer.name] = rosterPlayer;
+  }
+
+  return next;
+}
+
+function handle_action_request_post(
+  state: TransportState,
+  action: ActionRequest,
+  actorName: string,
+  sessionId: string,
+): TransportState {
+  if (state.phase !== "running" || !is_current_session(state, actorName, sessionId)) {
+    return state;
+  }
+
+  if (actorName !== action.actorName && state.masterName !== actorName) {
+    return state;
+  }
+
+  if (state.actionRequests.some((item) => item.id === action.id) || state.consumedActionIds.includes(action.id)) {
+    return state;
+  }
+
+  const next = clone_state(state);
+  next.actionRequests.push(action);
+  return next;
+}
+
+function is_current_session(state: TransportState, name: string, sessionId: string): boolean {
+  return state.roster[name]?.activeSessionId === sessionId;
+}
+
+function is_transport_player_connected(state: TransportState, player: TransportPlayer): boolean {
+  if (!player.activeSessionId) {
+    return false;
+  }
+  return state.clockTick - player.lastSeenTick <= HEARTBEAT_GRACE_TICKS;
 }
 
 export function compute_angle(from: MazeRoom, to: MazeRoom): number {

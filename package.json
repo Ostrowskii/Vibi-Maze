@@ -2,17 +2,16 @@
   "name": "vibi-maze",
   "private": true,
   "version": "0.1.0",
-  "description": "Host-authoritative multiplayer maze with lobby, master editor and turn-based fox vs hens gameplay.",
+  "description": "VibiNet-powered multiplayer maze with lobby, master editor and UI-only hidden information.",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node server/index.mjs",
     "build:web": "vite build",
     "build": "npm run build:web",
     "preview": "vite preview"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "vibinet": "^0.1.1"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

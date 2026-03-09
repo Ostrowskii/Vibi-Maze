@@ -1,16 +1,21 @@
 import "./style.css";
+import { OFFICIAL_SERVER_URL, VibiNet } from "vibinet";
 import {
   add_room,
   add_self_loop,
   apply_kill_choice,
   apply_move,
+  apply_transport_post,
   build_public_state,
   choose_fox,
   choose_random_fox,
   clone_state,
   create_default_maze,
   create_empty_state,
+  create_transport_state,
   cycle_room_type,
+  derive_room_sync,
+  encode_transport_post,
   move_room,
   normalize_name,
   normalize_room,
@@ -18,17 +23,16 @@ import {
   reset_to_lobby,
   start_game,
   sync_state_players,
+  tick_transport_state,
   toggle_corridor,
 } from "./game";
 import type {
-  ClientToServerMessage,
   FullGameState,
   LimitedPlayerView,
-  MazeRoom,
+  NetPost,
   Presence,
-  PublicState,
   RoomSync,
-  ServerToClientMessage,
+  TransportState,
 } from "./protocol";
 
 type UiState = {
@@ -46,8 +50,12 @@ type UiState = {
 
 const NAME_KEY = "vibi-maze-name";
 const ROOM_KEY = "vibi-maze-room";
+const SESSION_KEY = "vibi-maze-session";
 const VIEWBOX_WIDTH = 900;
 const VIEWBOX_HEIGHT = 660;
+const SYNC_INTERVAL_MS = 200;
+const HEARTBEAT_INTERVAL_MS = 2500;
+const TRANSPORT_PACKER = { $: "String" } as const;
 const query = new URLSearchParams(window.location.search);
 
 const uiState: UiState = {
@@ -63,9 +71,16 @@ const uiState: UiState = {
   toast: "",
 };
 
-let socket: WebSocket | null = null;
+let game: VibiNet<TransportState, string> | null = null;
 let socketState: "idle" | "connecting" | "connected" | "closed" = "idle";
+let activeRoom: string | null = null;
+let activeName: string | null = null;
+let activeSessionId = ensure_session_id();
+let syncLoopId: number | null = null;
+let heartbeatLoopId: number | null = null;
+let sharedState: TransportState | null = null;
 let lastSync: RoomSync | null = null;
+let lastSyncSignature = "";
 let masterState: FullGameState | null = null;
 let lastPublishedSignature = "";
 let lastServerFullSignature = "";
@@ -144,7 +159,12 @@ root.addEventListener("click", async (event) => {
 
   switch (action) {
     case "claim-master":
-      send({ type: "claim_master" });
+      if (!lastSync) return;
+      post_transport({
+        $: "claim_master",
+        name: lastSync.selfName,
+        sessionId: activeSessionId,
+      });
       break;
     case "copy-link":
       await copy_room_link();
@@ -168,13 +188,9 @@ root.addEventListener("click", async (event) => {
       render();
       break;
     case "vote-swap-master":
-      send({ type: "vote_swap_master" });
-      break;
     case "become-master":
-      send({ type: "become_master" });
-      break;
     case "abandon-match":
-      send({ type: "abandon_match" });
+      flash("Troca de mestre nao existe nesta branch.");
       break;
     case "editor-add-room":
       if (!masterState) return;
@@ -283,60 +299,85 @@ function join_room(): void {
   uiState.nameInput = name;
   window.localStorage.setItem(ROOM_KEY, room);
   window.localStorage.setItem(NAME_KEY, name);
+  activeRoom = room;
+  activeName = name;
+  activeSessionId = refresh_session_id();
 
-  if (socket) {
-    socket.close();
-  }
+  close_transport();
+  lastSync = null;
+  lastSyncSignature = "";
+  sharedState = null;
+  masterState = null;
+  lastPublishedSignature = "";
+  lastServerFullSignature = "";
 
   socketState = "connecting";
-  const wsUrl = resolve_ws_url();
-  socket = new WebSocket(wsUrl);
+  const options: {
+    room: string;
+    initial: TransportState;
+    on_tick: (state: TransportState) => TransportState;
+    on_post: (post: string, state: TransportState) => TransportState;
+    packer: typeof TRANSPORT_PACKER;
+    tick_rate: number;
+    tolerance: number;
+    server?: string;
+  } = {
+    room,
+    initial: create_transport_state(),
+    on_tick: tick_transport_state,
+    on_post: apply_transport_post,
+    packer: TRANSPORT_PACKER,
+    tick_rate: 6,
+    tolerance: 300,
+  };
+  const explicitServer = resolve_ws_url();
+  if (explicitServer !== OFFICIAL_SERVER_URL) {
+    options.server = explicitServer;
+  }
 
-  socket.addEventListener("open", () => {
+  game = new VibiNet.game(options);
+  game.on_sync(() => {
     socketState = "connected";
-    send({ type: "join_room", room, name });
+    post_transport({
+      $: "join_room",
+      name,
+      sessionId: activeSessionId,
+    });
+    start_transport_loops();
+    sync_from_transport();
     render();
-  });
-
-  socket.addEventListener("close", () => {
-    socketState = "closed";
-    render();
-  });
-
-  socket.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data)) as ServerToClientMessage;
-    handle_server_message(message);
   });
 
   render();
 }
 
-function handle_server_message(message: ServerToClientMessage): void {
-  switch (message.type) {
-    case "sync":
-      lastSync = message.payload;
-      on_sync();
-      render();
-      break;
-    case "action_request":
-      if (!is_self_master() || !masterState) {
-        return;
+function sync_from_transport(): void {
+  if (!game || !activeRoom || !activeName) {
+    return;
+  }
+
+  sharedState = game.compute_render_state();
+  const nextSync = derive_room_sync(activeRoom, activeName, sharedState);
+
+  if (nextSync.fullState) {
+    const fullSignature = JSON.stringify(nextSync.fullState);
+    if (fullSignature !== lastServerFullSignature && !uiState.dragRoomId) {
+      lastServerFullSignature = fullSignature;
+      if (!masterState || nextSync.masterName !== nextSync.selfName) {
+        masterState = clone_state(nextSync.fullState);
       }
-      if (message.action.type === "move") {
-        masterState = apply_move(masterState, message.action.actorName, message.action.corridorId);
-      } else {
-        masterState = apply_kill_choice(masterState, message.action.actorName, message.action.targetName);
-      }
-      publish_master_state();
-      render();
-      break;
-    case "force_logout":
-      flash(message.reason);
-      socket?.close();
-      break;
-    case "error":
-      flash(message.message);
-      break;
+    }
+  } else {
+    lastServerFullSignature = "";
+  }
+
+  lastSync = nextSync;
+  on_sync();
+
+  const signature = JSON.stringify(lastSync);
+  if (signature !== lastSyncSignature) {
+    lastSyncSignature = signature;
+    render();
   }
 }
 
@@ -345,19 +386,13 @@ function on_sync(): void {
     return;
   }
 
-  if (lastSync.fullState) {
-    const fullSignature = JSON.stringify(lastSync.fullState);
-    lastServerFullSignature = fullSignature;
-    if (!masterState || !is_self_master()) {
-      masterState = clone_state(lastSync.fullState);
-    }
-  }
-
   if (is_self_master()) {
     const base = masterState ?? lastSync.fullState ?? create_empty_state(lastSync.room, lastSync.players, lastSync.masterName);
     const withRoster = sync_state_players(base, lastSync.players, lastSync.masterName);
     masterState = withRoster;
-    publish_master_state();
+    if (!flush_master_actions()) {
+      publish_master_state();
+    }
   }
 
   const self = self_presence();
@@ -372,21 +407,51 @@ function on_sync(): void {
   }
 }
 
-function publish_master_state(): void {
+function flush_master_actions(): boolean {
+  if (!lastSync || !masterState) {
+    return false;
+  }
+
+  const pendingActions = lastSync.pendingActions;
+  if (pendingActions.length === 0) {
+    return false;
+  }
+
+  let nextState = masterState;
+  const consumedActionIds: string[] = [];
+
+  for (const action of pendingActions) {
+    nextState =
+      action.type === "move"
+        ? apply_move(nextState, action.actorName, action.corridorId)
+        : apply_kill_choice(nextState, action.actorName, action.targetName);
+    consumedActionIds.push(action.id);
+  }
+
+  masterState = nextState;
+  publish_master_state(consumedActionIds);
+  render();
+  return true;
+}
+
+function publish_master_state(consumedActionIds: string[] = []): void {
   if (!lastSync || !masterState || !is_self_master()) {
     return;
   }
   const publicState = build_public_state(masterState, lastSync.players);
   const fullState = clone_state(masterState);
-  const signature = JSON.stringify({ fullState, publicState });
+  const signature = JSON.stringify({ fullState, publicState, consumedActionIds });
   if (signature === lastPublishedSignature) {
     return;
   }
   lastPublishedSignature = signature;
-  send({
-    type: "publish_state",
+  post_transport({
+    $: "publish_state",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
     fullState,
     publicState,
+    consumedActionIds,
   });
 }
 
@@ -407,7 +472,14 @@ function handle_move(corridorId: string | null): void {
     return;
   }
 
-  send({ type: "submit_move", corridorId });
+  post_transport({
+    $: "submit_move",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    actorName,
+    requestId: new_request_id(),
+    corridorId,
+  });
 }
 
 function handle_kill(targetName: string): void {
@@ -427,7 +499,14 @@ function handle_kill(targetName: string): void {
     return;
   }
 
-  send({ type: "select_kill_target", targetName });
+  post_transport({
+    $: "select_kill_target",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    actorName,
+    requestId: new_request_id(),
+    targetName,
+  });
 }
 
 function action_actor_name(): string | null {
@@ -459,12 +538,70 @@ function can_master_override(): boolean {
   return actor?.connected === false;
 }
 
-function send(message: ClientToServerMessage): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    flash("Sem conexão com o relay.");
+function post_transport(post: NetPost): void {
+  if (!game) {
+    flash("Sem conexao com o VibiNet.");
     return;
   }
-  socket.send(JSON.stringify(message));
+  game.post(encode_transport_post(post));
+}
+
+function start_transport_loops(): void {
+  if (syncLoopId !== null) {
+    window.clearInterval(syncLoopId);
+  }
+  if (heartbeatLoopId !== null) {
+    window.clearInterval(heartbeatLoopId);
+  }
+
+  syncLoopId = window.setInterval(() => {
+    sync_from_transport();
+  }, SYNC_INTERVAL_MS);
+
+  heartbeatLoopId = window.setInterval(() => {
+    if (!lastSync) {
+      return;
+    }
+    post_transport({
+      $: "heartbeat",
+      name: lastSync.selfName,
+      sessionId: activeSessionId,
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function close_transport(): void {
+  if (syncLoopId !== null) {
+    window.clearInterval(syncLoopId);
+    syncLoopId = null;
+  }
+  if (heartbeatLoopId !== null) {
+    window.clearInterval(heartbeatLoopId);
+    heartbeatLoopId = null;
+  }
+  game?.close();
+  game = null;
+  socketState = "closed";
+}
+
+function ensure_session_id(): string {
+  const existing = window.sessionStorage.getItem(SESSION_KEY);
+  if (existing) {
+    return existing;
+  }
+  return refresh_session_id();
+}
+
+function refresh_session_id(): string {
+  const next = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  window.sessionStorage.setItem(SESSION_KEY, next);
+  return next;
+}
+
+function new_request_id(): string {
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function render(): void {
@@ -516,7 +653,7 @@ function render_join_screen(): string {
           </button>
         </form>
         <p class="helper">
-          Relay padrão: <code>${escape_html(resolve_ws_url())}</code>
+          Servidor VibiNet: <code>${escape_html(resolve_ws_url())}</code>
         </p>
         ${uiState.toast ? `<p class="toast">${escape_html(uiState.toast)}</p>` : ""}
       </section>
@@ -532,7 +669,7 @@ function render_header(): string {
   return `
     <header class="header-card">
       <div>
-        <p class="eyebrow">Host Authoritative</p>
+        <p class="eyebrow">Open Info / UI Oculta</p>
         <h1 class="title">Vibi-Maze</h1>
         <p class="subtitle">
           Room <code>${escape_html(lastSync.room)}</code> • voce é
@@ -923,8 +1060,9 @@ function render_connection_panel(): string {
   return `
     <section class="panel stack">
       <h2 class="section-title">Conexao</h2>
-      <p class="metric"><strong>Relay:</strong> ${escape_html(resolve_ws_url())}</p>
-      <p class="metric"><strong>Socket:</strong> ${escape_html(socketState)}</p>
+      <p class="metric"><strong>Servidor:</strong> ${escape_html(resolve_ws_url())}</p>
+      <p class="metric"><strong>Estado:</strong> ${escape_html(socketState)}</p>
+      <p class="metric"><strong>Ping:</strong> ${Math.round(game?.ping?.() ?? 0)} ms</p>
       ${lastSync.message ? `<p class="notice">${escape_html(lastSync.message)}</p>` : ""}
     </section>
   `;
@@ -977,38 +1115,7 @@ function render_side_rail(): string {
 }
 
 function render_modal(): string {
-  if (!lastSync || lastSync.phase !== "paused_master_disconnect") {
-    return "";
-  }
-  const sync = lastSync;
-
-  if (sync.swapMode === "quit") {
-    return `
-      <div class="modal-backdrop">
-        <div class="modal-card">
-          <h2>Mestre desconectado</h2>
-          <p>Deseja desistir da partida?</p>
-          <div class="button-row">
-            <button class="btn btn-danger" data-action="abandon-match" type="button">Desistir</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="modal-backdrop">
-      <div class="modal-card">
-        <h2>Mestre desconectado</h2>
-        <p>Trocar mestre?</p>
-        <p class="helper">Votos: ${sync.swapVotes.length}/${sync.players.filter((player) => player.connected && player.name !== sync.masterName).length}</p>
-        <div class="button-row">
-          <button class="btn btn-primary" data-action="vote-swap-master" type="button">Trocar mestre</button>
-          ${sync.canBecomeMaster ? '<button class="btn btn-secondary" data-action="become-master" type="button">Me tornar mestre</button>' : ""}
-        </div>
-      </div>
-    </div>
-  `;
+  return "";
 }
 
 function render_maze_svg(state: FullGameState, editable: boolean): string {
@@ -1245,9 +1352,7 @@ function resolve_ws_url(): string {
   if (explicit) {
     return explicit;
   }
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = window.location.hostname || "localhost";
-  return `${protocol}//${host}:8787`;
+  return OFFICIAL_SERVER_URL;
 }
 
 async function copy_room_link(): Promise<void> {

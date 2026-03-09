@@ -1,8 +1,4 @@
-export type RoomPhase =
-  | "lobby"
-  | "running"
-  | "paused_master_disconnect"
-  | "game_over";
+export type RoomPhase = "lobby" | "running" | "game_over";
 
 export type RoomType = "normal" | "shop";
 export type PlayerRole = "master" | "fox" | "hen" | "spectator" | "player";
@@ -93,6 +89,32 @@ export type PublicState = {
   pendingKillTargets: string[];
 };
 
+export type ActionRequest =
+  | { id: string; type: "move"; actorName: string; corridorId: string | null }
+  | { id: string; type: "kill"; actorName: string; targetName: string };
+
+export type TransportPlayer = {
+  name: string;
+  color: string;
+  joinedAt: number;
+  seat: SeatType;
+  activeSessionId: string | null;
+  lastSeenTick: number;
+};
+
+export type TransportState = {
+  phase: RoomPhase;
+  masterName: string | null;
+  roster: Record<string, TransportPlayer>;
+  publicState: PublicState | null;
+  fullState: FullGameState | null;
+  actionRequests: ActionRequest[];
+  consumedActionIds: string[];
+  message: string | null;
+  clockTick: number;
+  nextJoinOrder: number;
+};
+
 export type RoomSync = {
   room: string;
   selfName: string;
@@ -103,29 +125,38 @@ export type RoomSync = {
   fullState: FullGameState | null;
   canClaimMaster: boolean;
   canBecomeMaster: boolean;
-  swapMode: "none" | "quit" | "swap";
+  swapMode: "none";
   swapVotes: string[];
   eligibleNames: string[];
   message: string | null;
+  pendingActions: ActionRequest[];
 };
 
-export type ClientToServerMessage =
-  | { type: "join_room"; room: string; name: string }
-  | { type: "claim_master" }
-  | { type: "publish_state"; fullState: FullGameState; publicState: PublicState }
-  | { type: "submit_move"; corridorId: string | null }
-  | { type: "select_kill_target"; targetName: string }
-  | { type: "vote_swap_master" }
-  | { type: "become_master" }
-  | { type: "abandon_match" };
-
-export type ServerToClientMessage =
-  | { type: "sync"; payload: RoomSync }
+export type NetPost =
+  | { $: "join_room"; name: string; sessionId: string }
+  | { $: "heartbeat"; name: string; sessionId: string }
+  | { $: "claim_master"; name: string; sessionId: string }
   | {
-      type: "action_request";
-      action:
-        | { type: "move"; actorName: string; corridorId: string | null }
-        | { type: "kill"; actorName: string; targetName: string };
+      $: "publish_state";
+      name: string;
+      sessionId: string;
+      fullState: FullGameState;
+      publicState: PublicState;
+      consumedActionIds: string[];
     }
-  | { type: "force_logout"; reason: string }
-  | { type: "error"; message: string };
+  | {
+      $: "submit_move";
+      name: string;
+      sessionId: string;
+      actorName: string;
+      requestId: string;
+      corridorId: string | null;
+    }
+  | {
+      $: "select_kill_target";
+      name: string;
+      sessionId: string;
+      actorName: string;
+      requestId: string;
+      targetName: string;
+    };
