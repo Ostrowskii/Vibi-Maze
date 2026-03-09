@@ -1,36 +1,39 @@
 # Vibi-Maze
 
-Protótipo de labirinto multiplayer usando `vibinet` para sincronizar apenas inputs.
+Jogo multiplayer com `room + nome`, mestre fixo, editor de labirinto e partida por turnos entre raposa e galinhas.
 
-## O que já está implementado
+## O que esta implementado
 
-- entrada automática na sala com `spawn` sincronizado;
-- movimento multiplayer por `WASD`/setas;
-- emotes rápidos (`1` a `4`) sincronizados;
-- objetivo compartilhado: coletar duas relíquias para abrir a saída;
-- reinício de rodada com `R`;
-- configuração de sala e servidor por query string ou `.env`.
+- entrada por `room` e `nome`;
+- lobby com eleição de mestre;
+- editor livre do mestre com salas, corredores, loop e mapa default 3x3;
+- escolha ou sorteio da raposa;
+- jogo por turnos com visão limitada por sala;
+- trilho lateral para acompanhar as telas dos jogadores;
+- espectador total para mortes e entradas tardias;
+- relay websocket próprio com reconexão por `nome + room`.
 
 ## Rodando
 
 ```bash
 npm install
+npm run server
 npm run dev
 ```
 
-Por padrão o cliente usa o servidor oficial do `vibinet`.
+O cliente assume por padrão o relay local em `ws://127.0.0.1:8787`.
 
 ### Query params úteis
 
 - `?room=minha-sala`
-- `?char=A`
-- `?server=ws://localhost:8080`
+- `?name=Ana`
+- `?server=ws://127.0.0.1:8787`
 
 Exemplo:
 
 ```text
-http://localhost:5173/?room=duo-lab&char=A
-http://localhost:5173/?room=duo-lab&char=B
+http://localhost:5173/?room=galinheiro&name=Ana
+http://localhost:5173/?room=galinheiro&name=Bruno
 ```
 
 ## Build
@@ -38,13 +41,3 @@ http://localhost:5173/?room=duo-lab&char=B
 ```bash
 npm run build
 ```
-
-## Servidor próprio
-
-Se quiser sair do endpoint oficial, o repo local [`../VibiNet`](../VibiNet) já tem o servidor da lib. Pela documentação da própria lib:
-
-```bash
-bun run src/server.ts
-```
-
-Depois abra o jogo com `?server=ws://localhost:8080`.

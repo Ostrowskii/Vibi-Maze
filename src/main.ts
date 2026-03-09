@@ -1,969 +1,1282 @@
-import { VibiNet } from "vibinet";
 import "./style.css";
+import {
+  add_room,
+  add_self_loop,
+  apply_kill_choice,
+  apply_move,
+  build_public_state,
+  choose_fox,
+  choose_random_fox,
+  clone_state,
+  create_default_maze,
+  create_empty_state,
+  cycle_room_type,
+  move_room,
+  normalize_name,
+  normalize_room,
+  remove_room,
+  reset_to_lobby,
+  start_game,
+  sync_state_players,
+  toggle_corridor,
+} from "./game";
+import type {
+  ClientToServerMessage,
+  FullGameState,
+  LimitedPlayerView,
+  MazeRoom,
+  Presence,
+  PublicState,
+  RoomSync,
+  ServerToClientMessage,
+} from "./protocol";
 
-type DirectionTag = "up" | "right" | "down" | "left";
-type Direction = { $: DirectionTag };
-
-type EmoteTag = "oi" | "vem" | "espera" | "chave";
-type Emote = { $: EmoteTag };
-
-type Post =
-  | { $: "spawn"; pid: number }
-  | { $: "down"; pid: number; dir: Direction }
-  | { $: "up"; pid: number; dir: Direction }
-  | { $: "emote"; pid: number; emote: Emote }
-  | { $: "restart"; pid: number };
-
-type Player = {
-  pid: number;
-  x: number;
-  y: number;
-  up: number;
-  right: number;
-  down: number;
-  left: number;
-  facing: DirectionTag;
-  move_cooldown: number;
-  emote: EmoteTag | "";
-  emote_ttl: number;
-  steps: number;
+type UiState = {
+  roomInput: string;
+  nameInput: string;
+  followTurn: boolean;
+  watchName: string | null;
+  sideRailOpen: boolean;
+  revealFullMap: boolean;
+  selectedRoomId: string | null;
+  connectSourceRoomId: string | null;
+  dragRoomId: string | null;
+  toast: string;
 };
 
-type State = {
-  players: Record<string, Player>;
-  relics_mask: number;
-  winner_pid: number;
-  round: number;
+const NAME_KEY = "vibi-maze-name";
+const ROOM_KEY = "vibi-maze-room";
+const VIEWBOX_WIDTH = 900;
+const VIEWBOX_HEIGHT = 660;
+const query = new URLSearchParams(window.location.search);
+
+const uiState: UiState = {
+  roomInput: query.get("room") ?? window.localStorage.getItem(ROOM_KEY) ?? "galinheiro-1",
+  nameInput: query.get("name") ?? window.localStorage.getItem(NAME_KEY) ?? "",
+  followTurn: true,
+  watchName: null,
+  sideRailOpen: true,
+  revealFullMap: false,
+  selectedRoomId: null,
+  connectSourceRoomId: null,
+  dragRoomId: null,
+  toast: "",
 };
 
-type Point = { x: number; y: number };
-
-const MAP = [
-  "###############",
-  "#...#.....#..R#",
-  "#.#.#.###.#.#.#",
-  "#.#...#...#.#.#",
-  "#.#####.###.#.#",
-  "#.....#...#...#",
-  "###.#.###.###.#",
-  "#...#...#.....#",
-  "#.###.#.#####.#",
-  "#R....#.....E.#",
-  "###############",
-] as const;
-
-const SPAWN_POINTS: readonly Point[] = [
-  { x: 1, y: 1 },
-  { x: 2, y: 1 },
-  { x: 3, y: 1 },
-  { x: 1, y: 2 },
-  { x: 1, y: 3 },
-  { x: 2, y: 3 },
-] as const;
-
-const RELICS = [
-  { x: 13, y: 1, bit: 1, label: "Sol" },
-  { x: 1, y: 9, bit: 2, label: "Lua" },
-] as const;
-
-const EXIT_TILE = { x: 12, y: 9 } as const;
-const ALL_RELICS_MASK = RELICS.reduce((mask, relic) => mask | relic.bit, 0);
-const DIRECTION_ORDER: readonly DirectionTag[] = ["up", "right", "down", "left"];
-const PLAYER_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ123456789";
-const TILE_SIZE = 48;
-const CANVAS_WIDTH = MAP[0].length * TILE_SIZE;
-const CANVAS_HEIGHT = MAP.length * TILE_SIZE;
-const TICK_RATE = 10;
-const TOLERANCE_MS = 240;
-const MOVE_COOLDOWN = 2;
-const EMOTE_TTL = 18;
-const PLAYER_STORAGE_KEY = "vibi-maze-player-char";
-const COLOR_PALETTE = [
-  "#f25f5c",
-  "#247ba0",
-  "#70c1b3",
-  "#f7b267",
-  "#8e6c88",
-  "#5c80bc",
-  "#9bc53d",
-  "#f18f01",
-] as const;
-
-const EMOTE_LABELS: Record<EmoteTag, string> = {
-  oi: "OI",
-  vem: "VEM",
-  espera: "ESPERA",
-  chave: "CHAVE",
-};
-
-const EMOTE_SHORTCUTS: Array<{ key: string; emote: EmoteTag }> = [
-  { key: "Digit1", emote: "oi" },
-  { key: "Digit2", emote: "vem" },
-  { key: "Digit3", emote: "espera" },
-  { key: "Digit4", emote: "chave" },
-];
-
-const initial: State = {
-  players: {},
-  relics_mask: 0,
-  winner_pid: 0,
-  round: 1,
-};
-
-const direction_packer: VibiNet.Packed = {
-  $: "Union",
-  variants: {
-    up: { $: "Struct", fields: {} },
-    right: { $: "Struct", fields: {} },
-    down: { $: "Struct", fields: {} },
-    left: { $: "Struct", fields: {} },
-  },
-};
-
-const emote_packer: VibiNet.Packed = {
-  $: "Union",
-  variants: {
-    oi: { $: "Struct", fields: {} },
-    vem: { $: "Struct", fields: {} },
-    espera: { $: "Struct", fields: {} },
-    chave: { $: "Struct", fields: {} },
-  },
-};
-
-const packer: VibiNet.Packed = {
-  $: "Union",
-  variants: {
-    spawn: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-      },
-    },
-    down: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        dir: direction_packer,
-      },
-    },
-    up: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        dir: direction_packer,
-      },
-    },
-    emote: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        emote: emote_packer,
-      },
-    },
-    restart: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-      },
-    },
-  },
-};
+let socket: WebSocket | null = null;
+let socketState: "idle" | "connecting" | "connected" | "closed" = "idle";
+let lastSync: RoomSync | null = null;
+let masterState: FullGameState | null = null;
+let lastPublishedSignature = "";
+let lastServerFullSignature = "";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Elemento #app não encontrado.");
 }
+const root: HTMLDivElement = app;
 
-app.innerHTML = `
-  <main class="shell">
-    <section class="board-panel">
-      <div class="masthead">
-        <div class="title-wrap">
-          <p class="eyebrow">Deterministic Multiplayer Maze</p>
-          <h1 class="title">Vibi-Maze</h1>
-          <p class="subtitle">
-            Colete as duas relíquias, abra a saída e sincronize tudo via <code>vibinet</code>.
-          </p>
-        </div>
-        <p class="status" id="status">
-          <span class="status-dot" id="status-dot"></span>
-          <span id="status-text">Sincronizando com a sala...</span>
-        </p>
-      </div>
-      <div class="board-wrap">
-        <canvas
-          id="maze"
-          class="board-canvas"
-          width="${CANVAS_WIDTH}"
-          height="${CANVAS_HEIGHT}"
-        ></canvas>
-      </div>
-      <div class="board-caption">
-        <span>Objetivo cooperativo com relíquias compartilhadas e saída global.</span>
-        <span>Movimento contínuo por input sync, sem snapshot de estado.</span>
-      </div>
-    </section>
-    <aside class="side-panel">
-      <section class="panel-card">
-        <h2 class="panel-title">Sessão</h2>
-        <p class="metric">Sala: <strong><code id="room-label"></code></strong></p>
-        <p class="metric">Jogador: <strong><span class="badge" id="player-badge"></span></strong></p>
-        <p class="metric">Servidor: <strong><code id="server-label"></code></strong></p>
-        <p class="metric">Rodada: <strong id="round-label">1</strong></p>
-      </section>
-      <section class="panel-card">
-        <h2 class="panel-title">Objetivo</h2>
-        <p class="objective" id="objective-text"></p>
-        <p class="objective-note" id="objective-note"></p>
-      </section>
-      <section class="panel-card">
-        <h2 class="panel-title">Time na Sala</h2>
-        <ul class="player-list" id="player-list"></ul>
-      </section>
-      <section class="panel-card controls">
-        <h2 class="panel-title">Controles</h2>
-        <ul class="hotkeys">
-          <li><code>W A S D</code> ou setas para andar</li>
-          <li><code>1</code> a <code>4</code> para emotes rápidos</li>
-          <li><code>R</code> para reiniciar a rodada</li>
-        </ul>
-        <div class="action-row">
-          <button id="restart-btn" class="btn btn-primary" type="button">Reiniciar</button>
-          <button id="copy-room-btn" class="btn btn-secondary" type="button">Copiar link</button>
-        </div>
-        <p class="copy-feedback" id="copy-feedback"></p>
-      </section>
-      <p class="footer-note">
-        Abra duas abas com a mesma <code>room</code> e <code>char</code> diferentes para testar o multiplayer.
-      </p>
-    </aside>
-  </main>
-`;
+root.addEventListener("submit", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLFormElement)) {
+    return;
+  }
 
-const canvas = document.querySelector<HTMLCanvasElement>("#maze");
-const statusDot = document.querySelector<HTMLSpanElement>("#status-dot");
-const statusText = document.querySelector<HTMLSpanElement>("#status-text");
-const roomLabel = document.querySelector<HTMLElement>("#room-label");
-const playerBadge = document.querySelector<HTMLElement>("#player-badge");
-const serverLabel = document.querySelector<HTMLElement>("#server-label");
-const roundLabel = document.querySelector<HTMLElement>("#round-label");
-const objectiveText = document.querySelector<HTMLElement>("#objective-text");
-const objectiveNote = document.querySelector<HTMLElement>("#objective-note");
-const playerList = document.querySelector<HTMLUListElement>("#player-list");
-const restartButton = document.querySelector<HTMLButtonElement>("#restart-btn");
-const copyRoomButton = document.querySelector<HTMLButtonElement>("#copy-room-btn");
-const copyFeedback = document.querySelector<HTMLElement>("#copy-feedback");
-
-if (
-  !canvas ||
-  !statusDot ||
-  !statusText ||
-  !roomLabel ||
-  !playerBadge ||
-  !serverLabel ||
-  !roundLabel ||
-  !objectiveText ||
-  !objectiveNote ||
-  !playerList ||
-  !restartButton ||
-  !copyRoomButton ||
-  !copyFeedback
-) {
-  throw new Error("Estrutura da interface inválida.");
-}
-
-const context = canvas.getContext("2d");
-if (!context) {
-  throw new Error("Canvas 2D indisponível.");
-}
-
-const statusDotEl: HTMLSpanElement = statusDot;
-const statusTextEl: HTMLSpanElement = statusText;
-const roomLabelEl: HTMLElement = roomLabel;
-const playerBadgeEl: HTMLElement = playerBadge;
-const serverLabelEl: HTMLElement = serverLabel;
-const roundLabelEl: HTMLElement = roundLabel;
-const objectiveTextEl: HTMLElement = objectiveText;
-const objectiveNoteEl: HTMLElement = objectiveNote;
-const playerListEl: HTMLUListElement = playerList;
-const restartButtonEl: HTMLButtonElement = restartButton;
-const copyRoomButtonEl: HTMLButtonElement = copyRoomButton;
-const copyFeedbackEl: HTMLElement = copyFeedback;
-const ctx: CanvasRenderingContext2D = context;
-
-const query = new URLSearchParams(window.location.search);
-const room = resolve_room(query.get("room"), import.meta.env.VITE_VIBINET_ROOM);
-const playerChar = resolve_player_char(query.get("char"));
-const pid = playerChar.charCodeAt(0);
-const server = resolve_server(query.get("server"), import.meta.env.VITE_VIBINET_SERVER);
-
-roomLabelEl.textContent = room;
-playerBadgeEl.textContent = playerChar;
-serverLabelEl.textContent = server ? normalize_server_label(server) : "oficial";
-
-const game = new VibiNet.game<State, Post>({
-  room,
-  server,
-  initial,
-  on_tick,
-  on_post,
-  packer,
-  tick_rate: TICK_RATE,
-  tolerance: TOLERANCE_MS,
-  smooth: (remote_state, local_state) => {
-    const me = local_state.players[playerChar];
-    if (!me) {
-      return remote_state;
-    }
-    return {
-      ...remote_state,
-      players: {
-        ...remote_state.players,
-        [playerChar]: me,
-      },
-    };
-  },
+  if (target.dataset.form === "join") {
+    event.preventDefault();
+    join_room();
+  }
 });
 
-const pressedDirections = new Set<DirectionTag>();
-let synced = false;
-let spawned = false;
+root.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
 
-game.on_sync(() => {
-  synced = true;
-  statusDotEl.classList.add("is-live");
-  statusTextEl.textContent = `Conectado na sala ${room}`;
+  if (target.name === "room") {
+    uiState.roomInput = target.value;
+  }
+  if (target.name === "name") {
+    uiState.nameInput = target.value;
+  }
+});
 
-  if (!spawned) {
-    spawned = true;
-    game.post({ $: "spawn", pid });
+root.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.dataset.action === "fox-select") {
+    if (!masterState) {
+      return;
+    }
+    masterState = choose_fox(masterState, target.value);
+    publish_master_state();
+    render();
+  }
+
+  if (target instanceof HTMLInputElement && target.dataset.action === "follow-toggle") {
+    uiState.followTurn = target.checked;
+    if (uiState.followTurn) {
+      uiState.watchName = lastSync?.publicState?.currentTurnName ?? lastSync?.selfName ?? null;
+    }
+    render();
+  }
+});
+
+root.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const actionEl = target.closest<HTMLElement>("[data-action]");
+  if (!actionEl) {
+    return;
+  }
+
+  const action = actionEl.dataset.action;
+  if (!action) {
+    return;
+  }
+
+  switch (action) {
+    case "claim-master":
+      send({ type: "claim_master" });
+      break;
+    case "copy-link":
+      await copy_room_link();
+      break;
+    case "toggle-rail":
+      uiState.sideRailOpen = !uiState.sideRailOpen;
+      render();
+      break;
+    case "watch-screen":
+      uiState.watchName = actionEl.dataset.name ?? lastSync?.selfName ?? null;
+      uiState.followTurn = false;
+      render();
+      break;
+    case "self-screen":
+      uiState.watchName = lastSync?.selfName ?? null;
+      uiState.followTurn = false;
+      render();
+      break;
+    case "reveal-full-map":
+      uiState.revealFullMap = true;
+      render();
+      break;
+    case "vote-swap-master":
+      send({ type: "vote_swap_master" });
+      break;
+    case "become-master":
+      send({ type: "become_master" });
+      break;
+    case "abandon-match":
+      send({ type: "abandon_match" });
+      break;
+    case "editor-add-room":
+      if (!masterState) return;
+      masterState = add_room(masterState);
+      publish_master_state();
+      render();
+      break;
+    case "editor-default":
+      if (!masterState) return;
+      {
+        const maze = create_default_maze();
+        masterState = {
+          ...masterState,
+          rooms: maze.rooms,
+          corridors: maze.corridors,
+        };
+      }
+      publish_master_state();
+      render();
+      break;
+    case "editor-connect":
+      uiState.connectSourceRoomId = uiState.selectedRoomId;
+      render();
+      break;
+    case "editor-cycle-type":
+      if (!masterState || !uiState.selectedRoomId) return;
+      masterState = cycle_room_type(masterState, uiState.selectedRoomId);
+      publish_master_state();
+      render();
+      break;
+    case "editor-remove-room":
+      if (!masterState || !uiState.selectedRoomId) return;
+      masterState = remove_room(masterState, uiState.selectedRoomId);
+      uiState.selectedRoomId = null;
+      uiState.connectSourceRoomId = null;
+      publish_master_state();
+      render();
+      break;
+    case "editor-loop":
+      if (!masterState || !uiState.selectedRoomId) return;
+      masterState = add_self_loop(masterState, uiState.selectedRoomId);
+      publish_master_state();
+      render();
+      break;
+    case "shuffle-fox":
+      if (!masterState) return;
+      masterState = choose_random_fox(masterState);
+      publish_master_state();
+      render();
+      break;
+    case "start-game":
+      if (!masterState || !lastSync) return;
+      {
+        const next = start_game(masterState, lastSync.players);
+        if (!next) {
+          flash("Precisa de pelo menos 2 jogadores ativos além do mestre para iniciar.");
+          return;
+        }
+        masterState = next;
+        uiState.revealFullMap = false;
+      }
+      publish_master_state();
+      render();
+      break;
+    case "back-to-lobby":
+      if (!masterState || !lastSync) return;
+      masterState = reset_to_lobby(masterState, lastSync.players);
+      uiState.revealFullMap = false;
+      publish_master_state();
+      render();
+      break;
+    case "submit-pass":
+      handle_move(null);
+      break;
+    case "submit-move":
+      handle_move(actionEl.dataset.corridorId ?? null);
+      break;
+    case "kill-target":
+      handle_kill(actionEl.dataset.targetName ?? "");
+      break;
+    default:
+      break;
   }
 });
 
 window.addEventListener("keydown", (event) => {
-  const direction = key_to_direction(event.code);
-  if (direction) {
-    event.preventDefault();
-    if (pressedDirections.has(direction)) {
-      return;
-    }
-    pressedDirections.add(direction);
-    post_if_synced({ $: "down", pid, dir: { $: direction } });
+  if (event.key === "Escape" && lastSync) {
+    uiState.watchName = lastSync.selfName;
+    uiState.followTurn = false;
+    render();
+  }
+});
+
+render();
+
+function join_room(): void {
+  const room = normalize_room(uiState.roomInput);
+  const name = normalize_name(uiState.nameInput);
+
+  if (!room || !name) {
+    flash("Informe room e nome.");
     return;
   }
 
-  if (event.code === "KeyR") {
-    event.preventDefault();
-    post_if_synced({ $: "restart", pid });
-    return;
+  uiState.roomInput = room;
+  uiState.nameInput = name;
+  window.localStorage.setItem(ROOM_KEY, room);
+  window.localStorage.setItem(NAME_KEY, name);
+
+  if (socket) {
+    socket.close();
   }
 
-  const shortcut = EMOTE_SHORTCUTS.find((item) => item.key === event.code);
-  if (shortcut && !event.repeat) {
-    event.preventDefault();
-    post_if_synced({ $: "emote", pid, emote: { $: shortcut.emote } });
-  }
-});
+  socketState = "connecting";
+  const wsUrl = resolve_ws_url();
+  socket = new WebSocket(wsUrl);
 
-window.addEventListener("keyup", (event) => {
-  const direction = key_to_direction(event.code);
-  if (!direction || !pressedDirections.has(direction)) {
-    return;
-  }
-  event.preventDefault();
-  pressedDirections.delete(direction);
-  post_if_synced({ $: "up", pid, dir: { $: direction } });
-});
+  socket.addEventListener("open", () => {
+    socketState = "connected";
+    send({ type: "join_room", room, name });
+    render();
+  });
 
-window.addEventListener("blur", () => {
-  release_all_directions();
-});
+  socket.addEventListener("close", () => {
+    socketState = "closed";
+    render();
+  });
 
-restartButtonEl.addEventListener("click", () => {
-  post_if_synced({ $: "restart", pid });
-});
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data)) as ServerToClientMessage;
+    handle_server_message(message);
+  });
 
-copyRoomButtonEl.addEventListener("click", async () => {
-  const share_url = build_room_url(room);
-  try {
-    await navigator.clipboard.writeText(share_url);
-    copyFeedbackEl.textContent = "Link da sala copiado.";
-  } catch {
-    copyFeedbackEl.textContent = share_url;
-  }
-});
-
-render_loop();
-
-function render_loop(): void {
-  requestAnimationFrame(render_loop);
-
-  if (!synced) {
-    draw_waiting_screen();
-    return;
-  }
-
-  const state = game.compute_render_state();
-  draw_state(state);
-  update_sidebar(state);
+  render();
 }
 
-function draw_waiting_screen(): void {
-  ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  ctx.fillStyle = "#08161c";
-  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
-  for (let y = 0; y < MAP.length; y += 1) {
-    for (let x = 0; x < MAP[0].length; x += 1) {
-      ctx.strokeStyle = "rgba(255,255,255,0.05)";
-      ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
-    }
-  }
-  ctx.fillStyle = "#fff5e8";
-  ctx.font = '700 28px "Avenir Next", "Trebuchet MS", sans-serif';
-  ctx.textAlign = "center";
-  ctx.fillText("Sincronizando sala...", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 8);
-  ctx.fillStyle = "rgba(255, 245, 232, 0.72)";
-  ctx.font = '600 14px "JetBrains Mono", "IBM Plex Mono", monospace';
-  ctx.fillText("VibiNet aguardando clock oficial", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 24);
-}
-
-function draw_state(state: State): void {
-  ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  draw_floor();
-  draw_relics(state);
-  draw_exit(state);
-  draw_players(state);
-
-  if (state.winner_pid !== 0) {
-    draw_victory_overlay(pid_to_char(state.winner_pid));
-  }
-}
-
-function draw_floor(): void {
-  for (let y = 0; y < MAP.length; y += 1) {
-    for (let x = 0; x < MAP[0].length; x += 1) {
-      const px = x * TILE_SIZE;
-      const py = y * TILE_SIZE;
-      const tile = MAP[y][x];
-
-      if (tile === "#") {
-        ctx.fillStyle = (x + y) % 2 === 0 ? "#16333a" : "#10262c";
-        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-        ctx.fillStyle = "rgba(255, 255, 255, 0.06)";
-        ctx.fillRect(px + 4, py + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+function handle_server_message(message: ServerToClientMessage): void {
+  switch (message.type) {
+    case "sync":
+      lastSync = message.payload;
+      on_sync();
+      render();
+      break;
+    case "action_request":
+      if (!is_self_master() || !masterState) {
+        return;
+      }
+      if (message.action.type === "move") {
+        masterState = apply_move(masterState, message.action.actorName, message.action.corridorId);
       } else {
-        ctx.fillStyle = (x + y) % 2 === 0 ? "#efe0bd" : "#e8d5ac";
-        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-        ctx.strokeStyle = "rgba(19, 33, 31, 0.05)";
-        ctx.strokeRect(px, py, TILE_SIZE, TILE_SIZE);
+        masterState = apply_kill_choice(masterState, message.action.actorName, message.action.targetName);
       }
-    }
+      publish_master_state();
+      render();
+      break;
+    case "force_logout":
+      flash(message.reason);
+      socket?.close();
+      break;
+    case "error":
+      flash(message.message);
+      break;
   }
 }
 
-function draw_relics(state: State): void {
-  for (const relic of RELICS) {
-    const collected = (state.relics_mask & relic.bit) !== 0;
-    if (collected) {
-      continue;
-    }
-
-    const center = tile_center(relic);
-    ctx.save();
-    ctx.translate(center.x, center.y);
-    ctx.rotate(Math.PI / 4);
-    ctx.fillStyle = relic.bit === 1 ? "#f0a54b" : "#79b8d1";
-    ctx.fillRect(-10, -10, 20, 20);
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.fillRect(-4, -4, 8, 8);
-    ctx.restore();
-  }
-}
-
-function draw_exit(state: State): void {
-  const px = EXIT_TILE.x * TILE_SIZE;
-  const py = EXIT_TILE.y * TILE_SIZE;
-  const open = state.relics_mask === ALL_RELICS_MASK;
-
-  ctx.fillStyle = open ? "#9bd174" : "#7c3a2c";
-  ctx.fillRect(px + 8, py + 6, TILE_SIZE - 16, TILE_SIZE - 12);
-  ctx.fillStyle = open ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 244, 232, 0.12)";
-  ctx.fillRect(px + 14, py + 10, TILE_SIZE - 28, TILE_SIZE - 20);
-  if (open) {
-    ctx.strokeStyle = "rgba(255,255,255,0.7)";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(px + 12, py + 8, TILE_SIZE - 24, TILE_SIZE - 16);
-  }
-}
-
-function draw_players(state: State): void {
-  const ids = sorted_player_ids(state.players);
-  for (const id of ids) {
-    const player = state.players[id];
-    if (!player) {
-      continue;
-    }
-
-    const center = tile_center(player);
-    const color = color_for_pid(player.pid);
-
-    ctx.beginPath();
-    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
-    ctx.ellipse(center.x, center.y + 13, 14, 8, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.fillStyle = color;
-    ctx.arc(center.x, center.y, 15, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (id === playerChar) {
-      ctx.beginPath();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "#fff6df";
-      ctx.arc(center.x, center.y, 20, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    ctx.fillStyle = "#082028";
-    ctx.font = '800 14px "JetBrains Mono", "IBM Plex Mono", monospace';
-    ctx.textAlign = "center";
-    ctx.fillText(id, center.x, center.y + 5);
-
-    if (player.emote && player.emote_ttl > 0) {
-      draw_emote_bubble(center.x, center.y - 28, EMOTE_LABELS[player.emote]);
-    }
-  }
-}
-
-function draw_emote_bubble(x: number, y: number, text: string): void {
-  const padding_x = 9;
-  const bubble_height = 22;
-  ctx.font = '700 11px "JetBrains Mono", "IBM Plex Mono", monospace';
-  const width = Math.max(34, ctx.measureText(text).width + padding_x * 2);
-  const left = x - width / 2;
-  const top = y - bubble_height / 2;
-
-  ctx.fillStyle = "rgba(255, 248, 235, 0.95)";
-  round_rect(ctx, left, top, width, bubble_height, 11);
-  ctx.fill();
-
-  ctx.fillStyle = "#103038";
-  ctx.textAlign = "center";
-  ctx.fillText(text, x, top + 14);
-}
-
-function draw_victory_overlay(winner: string): void {
-  ctx.fillStyle = "rgba(6, 15, 18, 0.44)";
-  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  ctx.fillStyle = "#fff7e8";
-  ctx.textAlign = "center";
-  ctx.font = '800 34px "Avenir Next", "Trebuchet MS", sans-serif';
-  ctx.fillText(`${winner} escapou do labirinto`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 10);
-  ctx.font = '700 14px "JetBrains Mono", "IBM Plex Mono", monospace';
-  ctx.fillText("Pressione R para reiniciar a rodada", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 24);
-}
-
-function update_sidebar(state: State): void {
-  roundLabelEl.textContent = String(state.round);
-  const relic_count = RELICS.filter((relic) => (state.relics_mask & relic.bit) !== 0).length;
-
-  if (state.winner_pid !== 0) {
-    objectiveTextEl.textContent = `${pid_to_char(state.winner_pid)} venceu a rodada.`;
-    objectiveNoteEl.textContent = "Pressione R para recolocar todo mundo na entrada.";
-  } else if (relic_count < RELICS.length) {
-    objectiveTextEl.textContent = `Relíquias ativadas: ${relic_count}/${RELICS.length}`;
-    objectiveNoteEl.textContent = "Pegue Sol e Lua para liberar a porta final.";
-  } else {
-    objectiveTextEl.textContent = "Saída aberta.";
-    objectiveNoteEl.textContent = "Agora basta qualquer jogador alcançar a porta verde.";
+function on_sync(): void {
+  if (!lastSync) {
+    return;
   }
 
-  const ids = sorted_player_ids(state.players);
-  playerListEl.innerHTML =
-    ids.length === 0
-      ? `<li class="player-item"><p class="player-name">Aguardando jogadores...</p></li>`
-      : ids
-          .map((id) => {
-            const player = state.players[id];
-            if (!player) {
-              return "";
-            }
-            const is_me = id === playerChar;
-            const emote = player.emote ? ` • ${EMOTE_LABELS[player.emote]}` : "";
-            return `
-              <li class="player-item ${is_me ? "is-me" : ""}">
-                <span class="player-token" style="background:${color_for_pid(player.pid)}"></span>
-                <div>
-                  <p class="player-name">${id}</p>
-                  <p class="player-meta">${player.steps} passos${emote}</p>
-                </div>
-                <span class="player-tag">${is_me ? "voce" : "ally"}</span>
-              </li>
-            `;
-          })
-          .join("");
-}
-
-function on_tick(state: State): State {
-  let relics_mask = state.relics_mask;
-  let winner_pid = state.winner_pid;
-  let players_changed = false;
-  const next_players: State["players"] = {};
-
-  for (const id of sorted_player_ids(state.players)) {
-    const player = state.players[id];
-    if (!player) {
-      continue;
-    }
-
-    let x = player.x;
-    let y = player.y;
-    let facing = player.facing;
-    let move_cooldown = player.move_cooldown > 0 ? player.move_cooldown - 1 : 0;
-    let steps = player.steps;
-    let emote_ttl = player.emote_ttl > 0 ? player.emote_ttl - 1 : 0;
-    let emote: Player["emote"] = emote_ttl === 0 ? "" : player.emote;
-
-    if (winner_pid === 0 && move_cooldown === 0) {
-      const direction = pick_move_direction(player);
-      if (direction) {
-        const target = offset_for_direction(x, y, direction);
-        facing = direction;
-        if (is_walkable(target.x, target.y)) {
-          x = target.x;
-          y = target.y;
-          steps += 1;
-          move_cooldown = MOVE_COOLDOWN;
-          const relic_bit = relic_bit_at(x, y);
-          if (relic_bit !== 0) {
-            relics_mask |= relic_bit;
-          }
-          if (x === EXIT_TILE.x && y === EXIT_TILE.y && relics_mask === ALL_RELICS_MASK) {
-            winner_pid = player.pid;
-          }
-        } else {
-          move_cooldown = 1;
-        }
-      }
-    }
-
-    const changed =
-      x !== player.x ||
-      y !== player.y ||
-      facing !== player.facing ||
-      move_cooldown !== player.move_cooldown ||
-      steps !== player.steps ||
-      emote !== player.emote ||
-      emote_ttl !== player.emote_ttl;
-
-    next_players[id] = changed
-      ? {
-          ...player,
-          x,
-          y,
-          facing,
-          move_cooldown,
-          steps,
-          emote,
-          emote_ttl,
-        }
-      : player;
-
-    players_changed = players_changed || changed;
-  }
-
-  if (!players_changed && relics_mask === state.relics_mask && winner_pid === state.winner_pid) {
-    return state;
-  }
-
-  return {
-    ...state,
-    players: next_players,
-    relics_mask,
-    winner_pid,
-  };
-}
-
-function on_post(post: Post, state: State): State {
-  switch (post.$) {
-    case "spawn": {
-      const id = pid_to_char(post.pid);
-      if (state.players[id]) {
-        return state;
-      }
-      const spawn = find_spawn_point(post.pid, state.players);
-      return {
-        ...state,
-        players: {
-          ...state.players,
-          [id]: create_player(post.pid, spawn),
-        },
-      };
-    }
-
-    case "down":
-      return patch_player(state, pid_to_char(post.pid), (player) => {
-        const key = post.dir.$;
-        if (player[key] === 1 && player.facing === key) {
-          return player;
-        }
-        return {
-          ...player,
-          [key]: 1,
-          facing: key,
-        };
-      });
-
-    case "up":
-      return patch_player(state, pid_to_char(post.pid), (player) => {
-        const key = post.dir.$;
-        if (player[key] === 0) {
-          return player;
-        }
-        return {
-          ...player,
-          [key]: 0,
-        };
-      });
-
-    case "emote":
-      return patch_player(state, pid_to_char(post.pid), (player) => ({
-        ...player,
-        emote: post.emote.$,
-        emote_ttl: EMOTE_TTL,
-      }));
-
-    case "restart":
-      return restart_round(state);
-  }
-}
-
-function create_player(pid_value: number, spawn: Point): Player {
-  return {
-    pid: pid_value,
-    x: spawn.x,
-    y: spawn.y,
-    up: 0,
-    right: 0,
-    down: 0,
-    left: 0,
-    facing: "right",
-    move_cooldown: 0,
-    emote: "",
-    emote_ttl: 0,
-    steps: 0,
-  };
-}
-
-function restart_round(state: State): State {
-  const next_players: State["players"] = {};
-
-  for (const id of sorted_player_ids(state.players)) {
-    const current = state.players[id];
-    if (!current) {
-      continue;
-    }
-    const spawn = find_spawn_point(current.pid, next_players);
-    next_players[id] = create_player(current.pid, spawn);
-  }
-
-  return {
-    players: next_players,
-    relics_mask: 0,
-    winner_pid: 0,
-    round: state.round + 1,
-  };
-}
-
-function patch_player(
-  state: State,
-  id: string,
-  apply: (player: Player) => Player,
-): State {
-  const player = state.players[id];
-  if (!player) {
-    return state;
-  }
-
-  const next = apply(player);
-  if (next === player) {
-    return state;
-  }
-
-  return {
-    ...state,
-    players: {
-      ...state.players,
-      [id]: next,
-    },
-  };
-}
-
-function find_spawn_point(pid_value: number, players: Record<string, Player>): Point {
-  const occupied = new Set(Object.values(players).map((player) => `${player.x}:${player.y}`));
-  const start = pid_value % SPAWN_POINTS.length;
-
-  for (let offset = 0; offset < SPAWN_POINTS.length; offset += 1) {
-    const candidate = SPAWN_POINTS[(start + offset) % SPAWN_POINTS.length];
-    if (!occupied.has(`${candidate.x}:${candidate.y}`)) {
-      return candidate;
+  if (lastSync.fullState) {
+    const fullSignature = JSON.stringify(lastSync.fullState);
+    lastServerFullSignature = fullSignature;
+    if (!masterState || !is_self_master()) {
+      masterState = clone_state(lastSync.fullState);
     }
   }
 
-  return SPAWN_POINTS[start];
+  if (is_self_master()) {
+    const base = masterState ?? lastSync.fullState ?? create_empty_state(lastSync.room, lastSync.players, lastSync.masterName);
+    const withRoster = sync_state_players(base, lastSync.players, lastSync.masterName);
+    masterState = withRoster;
+    publish_master_state();
+  }
+
+  const self = self_presence();
+  if (self && self.seat === "spectator" && lastSync.phase !== "lobby") {
+    uiState.revealFullMap = true;
+  }
+
+  if (uiState.followTurn) {
+    uiState.watchName = lastSync.publicState?.currentTurnName ?? lastSync.selfName;
+  } else if (!uiState.watchName) {
+    uiState.watchName = lastSync.selfName;
+  }
 }
 
-function pick_move_direction(player: Player): DirectionTag | null {
-  if (player[player.facing] === 1) {
-    return player.facing;
+function publish_master_state(): void {
+  if (!lastSync || !masterState || !is_self_master()) {
+    return;
+  }
+  const publicState = build_public_state(masterState, lastSync.players);
+  const fullState = clone_state(masterState);
+  const signature = JSON.stringify({ fullState, publicState });
+  if (signature === lastPublishedSignature) {
+    return;
+  }
+  lastPublishedSignature = signature;
+  send({
+    type: "publish_state",
+    fullState,
+    publicState,
+  });
+}
+
+function handle_move(corridorId: string | null): void {
+  if (!lastSync) {
+    return;
+  }
+  const actorName = action_actor_name();
+  if (!actorName) {
+    return;
   }
 
-  for (const direction of DIRECTION_ORDER) {
-    if (player[direction] === 1) {
-      return direction;
-    }
+  if (is_self_master()) {
+    if (!masterState) return;
+    masterState = apply_move(masterState, actorName, corridorId);
+    publish_master_state();
+    render();
+    return;
   }
 
+  send({ type: "submit_move", corridorId });
+}
+
+function handle_kill(targetName: string): void {
+  if (!lastSync || !targetName) {
+    return;
+  }
+  const actorName = action_actor_name();
+  if (!actorName) {
+    return;
+  }
+
+  if (is_self_master()) {
+    if (!masterState) return;
+    masterState = apply_kill_choice(masterState, actorName, targetName);
+    publish_master_state();
+    render();
+    return;
+  }
+
+  send({ type: "select_kill_target", targetName });
+}
+
+function action_actor_name(): string | null {
+  if (!lastSync?.publicState?.currentTurnName) {
+    return null;
+  }
+  if (can_self_act()) {
+    return lastSync.selfName;
+  }
+  if (can_master_override()) {
+    return lastSync.publicState.currentTurnName;
+  }
   return null;
 }
 
-function offset_for_direction(x: number, y: number, direction: DirectionTag): Point {
-  switch (direction) {
-    case "up":
-      return { x, y: y - 1 };
-    case "right":
-      return { x: x + 1, y };
-    case "down":
-      return { x, y: y + 1 };
-    case "left":
-      return { x: x - 1, y };
+function can_self_act(): boolean {
+  if (!lastSync?.publicState?.currentTurnName) {
+    return false;
   }
+  return lastSync.publicState.currentTurnName === lastSync.selfName;
 }
 
-function key_to_direction(code: string): DirectionTag | null {
-  switch (code) {
-    case "ArrowUp":
-    case "KeyW":
-      return "up";
-    case "ArrowRight":
-    case "KeyD":
-      return "right";
-    case "ArrowDown":
-    case "KeyS":
-      return "down";
-    case "ArrowLeft":
-    case "KeyA":
-      return "left";
-    default:
-      return null;
+function can_master_override(): boolean {
+  if (!is_self_master() || !lastSync?.publicState?.currentTurnName) {
+    return false;
   }
+  const sync = lastSync;
+  const actor = sync.players.find((player) => player.name === sync.publicState?.currentTurnName);
+  return actor?.connected === false;
 }
 
-function release_all_directions(): void {
-  for (const direction of [...pressedDirections]) {
-    post_if_synced({ $: "up", pid, dir: { $: direction } });
-  }
-  pressedDirections.clear();
-}
-
-function post_if_synced(post: Post): void {
-  if (!synced) {
+function send(message: ClientToServerMessage): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    flash("Sem conexão com o relay.");
     return;
   }
-  game.post(post);
+  socket.send(JSON.stringify(message));
 }
 
-function is_walkable(x: number, y: number): boolean {
-  return MAP[y]?.[x] !== undefined && MAP[y][x] !== "#";
-}
-
-function relic_bit_at(x: number, y: number): number {
-  for (const relic of RELICS) {
-    if (relic.x === x && relic.y === y) {
-      return relic.bit;
-    }
+function render(): void {
+  if (!lastSync) {
+    root.innerHTML = render_join_screen();
+    return;
   }
-  return 0;
+
+  root.innerHTML = `
+    <main class="app-shell">
+      ${render_side_rail()}
+      <section class="main-column">
+        ${render_header()}
+        ${render_turn_banner()}
+        ${render_phase_content()}
+      </section>
+      <aside class="right-column">
+        ${render_roster_panel()}
+        ${render_controls_panel()}
+        ${render_connection_panel()}
+      </aside>
+      ${render_modal()}
+    </main>
+  `;
+
+  bind_editor_canvas();
 }
 
-function tile_center(point: Point): Point {
-  return {
-    x: point.x * TILE_SIZE + TILE_SIZE / 2,
-    y: point.y * TILE_SIZE + TILE_SIZE / 2,
+function render_join_screen(): string {
+  return `
+    <main class="join-shell">
+      <section class="join-card">
+        <p class="eyebrow">Room + Nome</p>
+        <h1 class="title">Vibi-Maze</h1>
+        <p class="subtitle">
+          Entre em uma sala, escolha um mestre e monte o labirinto antes da raposa sair caçando.
+        </p>
+        <form data-form="join" class="join-form">
+          <label class="field">
+            <span>Room</span>
+            <input name="room" value="${escape_html(uiState.roomInput)}" maxlength="36" />
+          </label>
+          <label class="field">
+            <span>Nome</span>
+            <input name="name" value="${escape_html(uiState.nameInput)}" maxlength="24" />
+          </label>
+          <button class="btn btn-primary" type="submit">
+            ${socketState === "connecting" ? "Conectando..." : "Entrar"}
+          </button>
+        </form>
+        <p class="helper">
+          Relay padrão: <code>${escape_html(resolve_ws_url())}</code>
+        </p>
+        ${uiState.toast ? `<p class="toast">${escape_html(uiState.toast)}</p>` : ""}
+      </section>
+    </main>
+  `;
+}
+
+function render_header(): string {
+  if (!lastSync) return "";
+  const self = self_presence();
+  const role = self?.role ?? "player";
+
+  return `
+    <header class="header-card">
+      <div>
+        <p class="eyebrow">Host Authoritative</p>
+        <h1 class="title">Vibi-Maze</h1>
+        <p class="subtitle">
+          Room <code>${escape_html(lastSync.room)}</code> • voce é
+          <strong>${escape_html(role_label(role))}</strong>
+        </p>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-secondary" data-action="copy-link" type="button">Copiar link</button>
+        ${lastSync.canClaimMaster ? '<button class="btn btn-primary" data-action="claim-master" type="button">Virar mestre</button>' : ""}
+      </div>
+    </header>
+  `;
+}
+
+function render_turn_banner(): string {
+  if (!lastSync) return "";
+  const sync = lastSync;
+  const current = sync.publicState?.currentTurnName
+    ? sync.players.find((player) => player.name === sync.publicState?.currentTurnName)
+    : null;
+
+  return `
+    <section class="turn-banner">
+      <div>
+        <p class="turn-label">FASE</p>
+        <strong>${escape_html(phase_label(sync.phase))}</strong>
+      </div>
+      <div>
+        <p class="turn-label">VEZ</p>
+        <strong style="${current ? `color:${current.color}` : ""}">
+          ${escape_html(current?.name ?? "Aguardando")}
+        </strong>
+      </div>
+      <label class="follow-toggle">
+        <input data-action="follow-toggle" type="checkbox" ${uiState.followTurn ? "checked" : ""} />
+        acompanhar a vez automaticamente
+      </label>
+    </section>
+  `;
+}
+
+function render_phase_content(): string {
+  if (!lastSync) return "";
+  if (lastSync.phase === "lobby") {
+    return `
+      <section class="phase-grid">
+        <div class="panel spacious">
+          ${is_self_master() ? render_master_editor() : render_waiting_lobby()}
+        </div>
+        <div class="panel">
+          ${render_lobby_controls()}
+        </div>
+      </section>
+    `;
+  }
+
+  const showFull = should_show_full_map();
+  return `
+    <section class="phase-grid running">
+      <div class="panel spacious">
+        ${showFull ? render_full_map_panel() : render_room_view_panel()}
+      </div>
+      <div class="panel">
+        ${render_runtime_info()}
+      </div>
+    </section>
+  `;
+}
+
+function render_waiting_lobby(): string {
+  return `
+    <div class="empty-panel">
+      <h2>Aguardando mestre</h2>
+      <p>
+        Quando alguem assumir o papel de mestre, essa pessoa vai editar o labirinto e escolher
+        quem sera a raposa.
+      </p>
+    </div>
+  `;
+}
+
+function render_lobby_controls(): string {
+  if (!lastSync) return "";
+  const candidateNames = lastSync.players
+    .filter((player) => !player.isMaster && player.seat === "participant")
+    .sort((left, right) => left.joinedAt - right.joinedAt)
+    .map((player) => `<option value="${escape_html(player.name)}">${escape_html(player.name)}</option>`)
+    .join("");
+
+  return `
+    <section class="stack">
+      <h2 class="section-title">Sala</h2>
+      <p class="metric"><strong>Jogadores ativos:</strong> ${lastSync.players.filter((player) => player.seat === "participant").length}</p>
+      <p class="metric"><strong>Mestre:</strong> ${escape_html(lastSync.masterName ?? "ninguem")}</p>
+      ${
+        is_self_master()
+          ? `
+            <label class="field">
+              <span>Raposa</span>
+              <select data-action="fox-select">
+                <option value="">Escolher depois</option>
+                ${candidateNames}
+              </select>
+            </label>
+            <div class="button-row">
+              <button class="btn btn-secondary" data-action="shuffle-fox" type="button">Sortear raposa</button>
+              <button class="btn btn-primary" data-action="start-game" type="button">Play</button>
+            </div>
+          `
+          : `
+            <p class="helper">Voce continua esperando no lobby enquanto o mestre desenha o mapa.</p>
+          `
+      }
+    </section>
+  `;
+}
+
+function render_master_editor(): string {
+  if (!masterState || !lastSync) return "";
+  const selectedRoom = uiState.selectedRoomId ? masterState.rooms[uiState.selectedRoomId] : null;
+  return `
+    <section class="editor-shell">
+      <div class="panel-header">
+        <div>
+          <h2 class="section-title">Editor do mestre</h2>
+          <p class="helper">Arraste salas, conecte pares e monte o labirinto antes do inicio.</p>
+        </div>
+        <div class="button-row tight">
+          <button class="btn btn-secondary" data-action="editor-add-room" type="button">Nova sala</button>
+          <button class="btn btn-secondary" data-action="editor-default" type="button">Mapa 3x3</button>
+        </div>
+      </div>
+      <svg class="editor-map" data-editor-svg viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
+        ${render_maze_svg(masterState, true)}
+      </svg>
+      <div class="editor-toolbar">
+        <div class="metric-block">
+          <strong>Sala selecionada</strong>
+          <span>${escape_html(selectedRoom?.id ?? "nenhuma")}</span>
+        </div>
+        <div class="metric-block">
+          <strong>Tipo</strong>
+          <span>${escape_html(selectedRoom?.type ?? "-")}</span>
+        </div>
+        <div class="button-row">
+          <button class="btn btn-secondary" data-action="editor-connect" type="button" ${selectedRoom ? "" : "disabled"}>
+            ${uiState.connectSourceRoomId ? "Clique em outra sala" : "Conectar"}
+          </button>
+          <button class="btn btn-secondary" data-action="editor-cycle-type" type="button" ${selectedRoom ? "" : "disabled"}>
+            Alternar tipo
+          </button>
+          <button class="btn btn-secondary" data-action="editor-loop" type="button" ${selectedRoom ? "" : "disabled"}>
+            Loop
+          </button>
+          <button class="btn btn-danger" data-action="editor-remove-room" type="button" ${selectedRoom ? "" : "disabled"}>
+            Remover
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function render_full_map_panel(): string {
+  if (!masterState) {
+    return '<div class="empty-panel"><h2>Sem mapa completo</h2></div>';
+  }
+
+  const canReturnToLobby = is_self_master();
+  return `
+    <section class="stack">
+      <div class="panel-header">
+        <div>
+          <h2 class="section-title">${is_self_master() ? "Mapa mestre" : "Visao completa"}</h2>
+          <p class="helper">
+            ${is_self_master() ? "Voce enxerga tudo o tempo todo." : "Agora voce pode assistir a partida inteira."}
+          </p>
+        </div>
+        ${canReturnToLobby ? '<button class="btn btn-secondary" data-action="back-to-lobby" type="button">Voltar ao lobby</button>' : ""}
+      </div>
+      <svg class="editor-map readonly" viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
+        ${render_maze_svg(masterState, false)}
+      </svg>
+      ${render_full_map_legend()}
+    </section>
+  `;
+}
+
+function render_full_map_legend(): string {
+  if (!lastSync) return "";
+  return `
+    <div class="legend-grid">
+      ${lastSync.players
+        .map((player) => `
+          <div class="legend-chip">
+            <span class="legend-color" style="background:${player.color}"></span>
+            <strong>${escape_html(player.name)}</strong>
+            <span>${escape_html(role_label(player.role))}</span>
+          </div>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
+function render_room_view_panel(): string {
+  if (!lastSync?.publicState) {
+    return '<div class="empty-panel"><h2>Aguardando dados da partida</h2></div>';
+  }
+
+  const watchedName = uiState.watchName ?? lastSync.selfName;
+  const view = lastSync.publicState.screens[watchedName] ?? null;
+  const selfFull = lastSync.fullState?.players[lastSync.selfName];
+  const showSpectatorButton = Boolean(selfFull && !selfFull.alive && selfFull.seat === "participant" && !uiState.revealFullMap);
+
+  if (!view) {
+    return `
+      <div class="empty-panel">
+        <h2>Sem tela para acompanhar</h2>
+        ${showSpectatorButton ? '<button class="btn btn-primary" data-action="reveal-full-map" type="button">Ficar de espectador</button>' : ""}
+      </div>
+    `;
+  }
+
+  const controlActorName = action_actor_name();
+  const isControlledView = controlActorName === watchedName;
+  const canMove = isControlledView && lastSync.publicState.pendingKillTargets.length === 0;
+  const canKill = isControlledView && lastSync.publicState.pendingKillTargets.length > 0;
+
+  return `
+    <section class="stack">
+      <div class="panel-header">
+        <div>
+          <h2 class="section-title">Tela de ${escape_html(view.name)}</h2>
+          <p class="helper">
+            ${escape_html(view.roomType ? `Sala ${room_type_label(view.roomType)}` : "Sem posicao visivel")}
+          </p>
+        </div>
+        ${showSpectatorButton ? '<button class="btn btn-secondary" data-action="reveal-full-map" type="button">Ficar de espectador</button>' : ""}
+      </div>
+      ${render_scene(view, canMove)}
+      ${
+        canKill
+          ? render_kill_picker(lastSync.publicState.pendingKillTargets)
+          : `
+            <div class="button-row">
+              <button class="btn btn-secondary" data-action="submit-pass" type="button" ${canMove ? "" : "disabled"}>Passar</button>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function render_kill_picker(targets: string[]): string {
+  return `
+    <div class="kill-picker">
+      <strong>Raposa escolhe quem cai:</strong>
+      <div class="button-row">
+        ${targets
+          .map((target) => `
+            <button class="btn btn-danger" data-action="kill-target" data-target-name="${escape_html(target)}" type="button">
+              ${escape_html(target)}
+            </button>
+          `)
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function render_scene(view: LimitedPlayerView, canMove: boolean): string {
+  const exits = position_exits(view.exits);
+  return `
+    <section class="scene-panel">
+      <div class="scene-box">
+        <div class="room-label">${escape_html(view.roomType ? room_type_label(view.roomType) : "Sem sala")}</div>
+        ${exits
+          .map((exit, index) => `
+            <button
+              class="exit-btn"
+              style="left:${exit.left}%;top:${exit.top}%;"
+              data-action="submit-move"
+              data-corridor-id="${escape_html(exit.corridorId)}"
+              type="button"
+              ${canMove ? "" : "disabled"}
+            >
+              <span class="exit-arrow" style="transform:rotate(${exit.angle}deg)">➜</span>
+              <small>${exit.angle}°</small>
+            </button>
+          `)
+          .join("")}
+        <div class="stickman-row">
+          ${view.playersHere
+            .map((player) => render_stickman(player.name, player.color))
+            .join("")}
+        </div>
+      </div>
+      <div class="scene-meta">
+        <p><strong>Jogadores na sala:</strong> ${view.playersHere.length || 0}</p>
+        <p><strong>Saidas:</strong> ${view.exits.map((exit) => `${exit.angle}°`).join(", ") || "nenhuma"}</p>
+      </div>
+    </section>
+  `;
+}
+
+function render_runtime_info(): string {
+  if (!lastSync) return "";
+  const watchedName = uiState.watchName ?? lastSync.selfName;
+  const current = lastSync.publicState?.currentTurnName ?? "Aguardando";
+  const self = self_presence();
+  const canOverride = can_master_override();
+
+  return `
+    <section class="stack">
+      <h2 class="section-title">Partida</h2>
+      <p class="metric"><strong>Rodada:</strong> ${lastSync.publicState?.round ?? 0}</p>
+      <p class="metric"><strong>Na tela:</strong> ${escape_html(watchedName)}</p>
+      <p class="metric"><strong>Turno atual:</strong> ${escape_html(current)}</p>
+      <p class="metric"><strong>Status:</strong> ${escape_html(phase_label(lastSync.phase))}</p>
+      ${
+        canOverride
+          ? `<p class="notice">Jogador atual caiu. O mestre pode agir por <strong>${escape_html(current)}</strong>.</p>`
+          : ""
+      }
+      ${
+        self && self.role === "spectator"
+          ? `<p class="helper">Voce entrou depois do inicio e esta vendo a partida como espectador total.</p>`
+          : ""
+      }
+      ${
+        uiState.toast
+          ? `<p class="toast">${escape_html(uiState.toast)}</p>`
+          : ""
+      }
+    </section>
+  `;
+}
+
+function render_roster_panel(): string {
+  if (!lastSync) return "";
+  const sync = lastSync;
+  return `
+    <section class="panel stack">
+      <h2 class="section-title">Jogadores</h2>
+      <ul class="roster">
+        ${sync.players
+          .map((player) => {
+            const isSelf = player.name === sync.selfName;
+            return `
+              <li class="roster-item ${isSelf ? "is-self" : ""}">
+                <span class="legend-color" style="background:${player.color}"></span>
+                <div>
+                  <strong>${escape_html(player.name)}</strong>
+                  <div class="helper">${escape_html(role_label(player.role))} • ${player.connected ? "online" : "offline"}</div>
+                </div>
+                <span class="tag">${player.alive ? "vivo" : player.seat === "spectator" ? "spec" : "fora"}</span>
+              </li>
+            `;
+          })
+          .join("")}
+      </ul>
+    </section>
+  `;
+}
+
+function render_controls_panel(): string {
+  if (!lastSync) return "";
+  return `
+    <section class="panel stack">
+      <h2 class="section-title">Visoes</h2>
+      <p class="helper">A barra da esquerda mostra as telas limitadas de cada jogador ativo.</p>
+      <div class="button-row">
+        <button class="btn btn-secondary" data-action="toggle-rail" type="button">
+          ${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}
+        </button>
+        <button class="btn btn-secondary" data-action="self-screen" type="button">
+          Voltar para minha tela
+        </button>
+      </div>
+      <p class="helper">Pressione <code>Esc</code> para voltar imediatamente para a propria tela.</p>
+    </section>
+  `;
+}
+
+function render_connection_panel(): string {
+  if (!lastSync) return "";
+  return `
+    <section class="panel stack">
+      <h2 class="section-title">Conexao</h2>
+      <p class="metric"><strong>Relay:</strong> ${escape_html(resolve_ws_url())}</p>
+      <p class="metric"><strong>Socket:</strong> ${escape_html(socketState)}</p>
+      ${lastSync.message ? `<p class="notice">${escape_html(lastSync.message)}</p>` : ""}
+    </section>
+  `;
+}
+
+function render_side_rail(): string {
+  if (!lastSync?.publicState) {
+    return `<aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}"></aside>`;
+  }
+  const sync = lastSync;
+  const publicState = sync.publicState!;
+
+  const orderedNames = [
+    sync.selfName,
+    ...publicState.watchOrder.filter((name) => name !== sync.selfName),
+  ];
+
+  return `
+    <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
+      <div class="side-rail-header">
+        <strong>Telas</strong>
+        <button class="ghost-btn" data-action="toggle-rail" type="button">${uiState.sideRailOpen ? "←" : "→"}</button>
+      </div>
+      ${orderedNames
+        .map((name) => {
+          const view = publicState.screens[name];
+          const player = sync.players.find((item) => item.name === name);
+          return `
+            <button
+              class="screen-card ${uiState.watchName === name ? "active" : ""}"
+              data-action="watch-screen"
+              data-name="${escape_html(name)}"
+              type="button"
+            >
+              <div class="screen-card-header">
+                <span class="legend-color" style="background:${player?.color ?? "#000"}"></span>
+                <strong>${escape_html(name)}</strong>
+              </div>
+              <div class="screen-card-body">
+                <span>${escape_html(role_label(player?.role ?? "player"))}</span>
+                <span>${escape_html(view?.roomType ? room_type_label(view.roomType) : "sem sala")}</span>
+                <span>${escape_html(view ? `${view.exits.length} saidas` : "-")}</span>
+              </div>
+            </button>
+          `;
+        })
+        .join("")}
+    </aside>
+  `;
+}
+
+function render_modal(): string {
+  if (!lastSync || lastSync.phase !== "paused_master_disconnect") {
+    return "";
+  }
+  const sync = lastSync;
+
+  if (sync.swapMode === "quit") {
+    return `
+      <div class="modal-backdrop">
+        <div class="modal-card">
+          <h2>Mestre desconectado</h2>
+          <p>Deseja desistir da partida?</p>
+          <div class="button-row">
+            <button class="btn btn-danger" data-action="abandon-match" type="button">Desistir</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="modal-backdrop">
+      <div class="modal-card">
+        <h2>Mestre desconectado</h2>
+        <p>Trocar mestre?</p>
+        <p class="helper">Votos: ${sync.swapVotes.length}/${sync.players.filter((player) => player.connected && player.name !== sync.masterName).length}</p>
+        <div class="button-row">
+          <button class="btn btn-primary" data-action="vote-swap-master" type="button">Trocar mestre</button>
+          ${sync.canBecomeMaster ? '<button class="btn btn-secondary" data-action="become-master" type="button">Me tornar mestre</button>' : ""}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function render_maze_svg(state: FullGameState, editable: boolean): string {
+  const playersByRoom = new Map<string, Array<{ name: string; color: string; role: string }>>();
+  for (const player of Object.values(state.players)) {
+    if (!player.locationRoomId) continue;
+    if (!playersByRoom.has(player.locationRoomId)) {
+      playersByRoom.set(player.locationRoomId, []);
+    }
+    playersByRoom.get(player.locationRoomId)?.push({
+      name: player.name,
+      color: player.color,
+      role: player.role,
+    });
+  }
+
+  return `
+    ${Object.values(state.corridors)
+      .map((corridor) => {
+        const fromRoom = state.rooms[corridor.fromRoomId];
+        const toRoom = state.rooms[corridor.toRoomId];
+        if (!fromRoom || !toRoom) return "";
+        if (fromRoom.id === toRoom.id) {
+          return `
+            <path
+              class="corridor-loop"
+              d="M ${fromRoom.x} ${fromRoom.y - 44} C ${fromRoom.x + 48} ${fromRoom.y - 120}, ${fromRoom.x - 48} ${fromRoom.y - 120}, ${fromRoom.x} ${fromRoom.y - 44}"
+            />
+          `;
+        }
+        return `
+          <line
+            class="corridor-line"
+            x1="${fromRoom.x}"
+            y1="${fromRoom.y}"
+            x2="${toRoom.x}"
+            y2="${toRoom.y}"
+          />
+        `;
+      })
+      .join("")}
+    ${Object.values(state.rooms)
+      .map((room) => {
+        const selected = uiState.selectedRoomId === room.id;
+        const connectArmed = uiState.connectSourceRoomId === room.id;
+        const tokens = playersByRoom.get(room.id) ?? [];
+        return `
+          <g
+            data-room-node="${escape_html(room.id)}"
+            class="room-node ${selected ? "selected" : ""} ${connectArmed ? "armed" : ""}"
+            transform="translate(${room.x}, ${room.y})"
+          >
+            <rect x="-54" y="-36" width="108" height="72" rx="22" class="room-shape ${room.type}" />
+            <text class="room-title" text-anchor="middle" y="4">${escape_html(room.id)}</text>
+            <text class="room-type" text-anchor="middle" y="24">${escape_html(room_type_label(room.type))}</text>
+            ${tokens
+              .map((token, index) => `
+                <circle cx="${-18 + index * 18}" cy="-12" r="6" fill="${token.color}" />
+              `)
+              .join("")}
+          </g>
+        `;
+      })
+      .join("")}
+    ${editable ? `<rect class="drag-layer" x="0" y="0" width="${VIEWBOX_WIDTH}" height="${VIEWBOX_HEIGHT}" fill="transparent" />` : ""}
+  `;
+}
+
+function render_stickman(name: string, color: string): string {
+  return `
+    <div class="stickman">
+      <svg viewBox="0 0 64 84" class="stickman-svg" aria-hidden="true">
+        <circle cx="32" cy="14" r="10" fill="${color}" />
+        <line x1="32" y1="24" x2="32" y2="52" stroke="${color}" stroke-width="6" stroke-linecap="round" />
+        <line x1="16" y1="36" x2="48" y2="36" stroke="${color}" stroke-width="6" stroke-linecap="round" />
+        <line x1="32" y1="52" x2="18" y2="74" stroke="${color}" stroke-width="6" stroke-linecap="round" />
+        <line x1="32" y1="52" x2="46" y2="74" stroke="${color}" stroke-width="6" stroke-linecap="round" />
+      </svg>
+      <span>${escape_html(name)}</span>
+    </div>
+  `;
+}
+
+function bind_editor_canvas(): void {
+  const svg = root.querySelector<SVGSVGElement>("[data-editor-svg]");
+  if (!svg || !is_self_master() || lastSync?.phase !== "lobby" || !masterState) {
+    return;
+  }
+
+  const toPoint = (event: PointerEvent): { x: number; y: number } => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * VIEWBOX_WIDTH;
+    const y = ((event.clientY - rect.top) / rect.height) * VIEWBOX_HEIGHT;
+    return {
+      x: Math.max(60, Math.min(VIEWBOX_WIDTH - 60, x)),
+      y: Math.max(60, Math.min(VIEWBOX_HEIGHT - 60, y)),
+    };
+  };
+
+  svg.onpointerdown = (event) => {
+    const target = event.target;
+    if (!(target instanceof SVGElement)) {
+      return;
+    }
+    const group = target.closest<SVGGElement>("[data-room-node]");
+    const roomId = group?.dataset.roomNode;
+    if (!roomId) {
+      return;
+    }
+
+    if (uiState.connectSourceRoomId && uiState.connectSourceRoomId !== roomId && masterState) {
+      masterState = toggle_corridor(masterState, uiState.connectSourceRoomId, roomId);
+      uiState.connectSourceRoomId = null;
+      publish_master_state();
+      render();
+      return;
+    }
+
+    if (uiState.connectSourceRoomId === roomId) {
+      uiState.connectSourceRoomId = null;
+      render();
+      return;
+    }
+
+    uiState.selectedRoomId = roomId;
+    uiState.dragRoomId = roomId;
+    render();
+    svg.setPointerCapture(event.pointerId);
+  };
+
+  svg.onpointermove = (event) => {
+    if (!uiState.dragRoomId || uiState.connectSourceRoomId || !masterState) {
+      return;
+    }
+    const point = toPoint(event);
+    masterState = move_room(masterState, uiState.dragRoomId, point.x, point.y);
+    render();
+  };
+
+  svg.onpointerup = () => {
+    if (uiState.dragRoomId) {
+      uiState.dragRoomId = null;
+      publish_master_state();
+      render();
+    }
   };
 }
 
-function color_for_pid(pid_value: number): string {
-  return COLOR_PALETTE[pid_value % COLOR_PALETTE.length];
-}
-
-function pid_to_char(pid_value: number): string {
-  return String.fromCharCode(pid_value);
-}
-
-function sorted_player_ids(players: Record<string, Player>): string[] {
-  return Object.keys(players).sort((left, right) => players[left]!.pid - players[right]!.pid);
-}
-
-function resolve_room(query_room: string | null, env_room: string | undefined): string {
-  const candidate = query_room?.trim() || env_room?.trim() || "maze-lobby";
-  return candidate.replace(/\s+/g, "-").slice(0, 48);
-}
-
-function resolve_player_char(query_char: string | null): string {
-  const candidate = (query_char ?? window.localStorage.getItem(PLAYER_STORAGE_KEY) ?? "")
-    .trim()
-    .slice(0, 1)
-    .toUpperCase();
-
-  if (is_valid_player_char(candidate)) {
-    window.localStorage.setItem(PLAYER_STORAGE_KEY, candidate);
-    return candidate;
+function should_show_full_map(): boolean {
+  if (!lastSync) return false;
+  if (is_self_master()) return true;
+  const self = lastSync.fullState?.players[lastSync.selfName];
+  const presence = self_presence();
+  if (presence?.seat === "spectator" && lastSync.phase !== "lobby") {
+    return true;
   }
-
-  const bytes = new Uint8Array(1);
-  crypto.getRandomValues(bytes);
-  const generated = PLAYER_CHARS[bytes[0] % PLAYER_CHARS.length];
-  window.localStorage.setItem(PLAYER_STORAGE_KEY, generated);
-  return generated;
+  return Boolean(self && !self.alive && uiState.revealFullMap);
 }
 
-function resolve_server(query_server: string | null, env_server: string | undefined): string | undefined {
-  const candidate = query_server?.trim() || env_server?.trim();
-  return candidate || undefined;
+function self_presence(): Presence | null {
+  return lastSync?.players.find((player) => player.name === lastSync?.selfName) ?? null;
 }
 
-function is_valid_player_char(value: string): boolean {
-  return PLAYER_CHARS.includes(value);
+function is_self_master(): boolean {
+  return Boolean(lastSync && lastSync.masterName === lastSync.selfName);
 }
 
-function normalize_server_label(value: string): string {
-  return value.replace(/^wss?:\/\//, "");
+function role_label(role: string): string {
+  switch (role) {
+    case "master":
+      return "mestre";
+    case "fox":
+      return "raposa";
+    case "hen":
+      return "galinha";
+    case "spectator":
+      return "espectador";
+    default:
+      return "jogador";
+  }
 }
 
-function build_room_url(next_room: string): string {
+function phase_label(phase: string): string {
+  switch (phase) {
+    case "lobby":
+      return "lobby";
+    case "running":
+      return "partida em andamento";
+    case "paused_master_disconnect":
+      return "pausado";
+    case "game_over":
+      return "fim da partida";
+    default:
+      return phase;
+  }
+}
+
+function room_type_label(roomType: string): string {
+  return roomType === "shop" ? "loja" : "normal";
+}
+
+function position_exits(exits: LimitedPlayerView["exits"]): Array<{
+  corridorId: string;
+  angle: number;
+  left: number;
+  top: number;
+}> {
+  const sorted = [...exits].sort((left, right) => left.angle - right.angle);
+  let previousAngle = -999;
+  let ring = 0;
+  return sorted.map((exit) => {
+    if (Math.abs(exit.angle - previousAngle) < 18) {
+      ring += 1;
+    } else {
+      ring = 0;
+    }
+    previousAngle = exit.angle;
+    const radians = (exit.angle * Math.PI) / 180;
+    const radiusX = 40 + ring * 8;
+    const radiusY = 28 + ring * 6;
+    const left = 50 + Math.cos(radians) * radiusX;
+    const top = 50 + Math.sin(radians) * radiusY;
+    return {
+      corridorId: exit.corridorId,
+      angle: exit.angle,
+      left,
+      top,
+    };
+  });
+}
+
+function resolve_ws_url(): string {
+  const explicit = query.get("server") ?? import.meta.env.VITE_MAZE_SERVER;
+  if (explicit) {
+    return explicit;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.hostname || "localhost";
+  return `${protocol}//${host}:8787`;
+}
+
+async function copy_room_link(): Promise<void> {
+  if (!lastSync) return;
   const url = new URL(window.location.href);
-  url.searchParams.set("room", next_room);
-  url.searchParams.delete("char");
-  return url.toString();
+  url.searchParams.set("room", lastSync.room);
+  const text = url.toString();
+  try {
+    await navigator.clipboard.writeText(text);
+    flash("Link da room copiado.");
+  } catch {
+    flash(text);
+  }
 }
 
-function round_rect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-): void {
-  const r = Math.min(radius, width / 2, height / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + width, y, x + width, y + height, r);
-  ctx.arcTo(x + width, y + height, x, y + height, r);
-  ctx.arcTo(x, y + height, x, y, r);
-  ctx.arcTo(x, y, x + width, y, r);
-  ctx.closePath();
+function flash(message: string): void {
+  uiState.toast = message;
+  render();
+  window.clearTimeout((flash as unknown as { timer?: number }).timer);
+  (flash as unknown as { timer?: number }).timer = window.setTimeout(() => {
+    uiState.toast = "";
+    render();
+  }, 2600);
+}
+
+function escape_html(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
