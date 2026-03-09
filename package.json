@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build:web": "vite build",
+    "build:pages": "bash scripts/build-pages.sh",
     "build": "npm run build:web",
     "preview": "vite preview"
   },

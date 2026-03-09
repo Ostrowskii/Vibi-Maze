@@ -43,9 +43,21 @@ npm run build
 
 ## GitHub Pages
 
-Na branch `open-info`, o Pages deve usar `GitHub Actions`, nao `Branch / root`.
+Na branch `open-info`, o Pages deve usar `Deploy from a branch` apontando para:
+
+- branch: `open-info`
+- folder: `/docs`
+
+Fluxo:
+
+```bash
+npm run build:pages
+git add docs
+git commit -m "Update Pages build"
+git push
+```
 
 Motivo:
-- `index.html` no root e codigo-fonte do Vite;
-- o Pages em `branch + root` serve esse fonte cru e tenta abrir `/src/main.ts`, o que quebra em repositorio publicado em subpasta;
-- o workflow em [.github/workflows/deploy-open-info-pages.yml](/home/zorro/Documents/www/vibi-maze/.github/workflows/deploy-open-info-pages.yml) faz o build e publica o `dist` correto.
+- o `root` do repositorio contem o fonte do Vite;
+- o GitHub Pages em `branch + root` tenta servir `src/main.ts`, o que quebra;
+- o comando `npm run build:pages` gera o site final em `docs/`, pronto para o Pages servir sem GitHub Actions.

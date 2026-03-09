@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+npx vite build --outDir docs --emptyOutDir
+touch docs/.nojekyll
