@@ -1,0 +1,20 @@
+{
+  "name": "vibi-maze",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Maze multiplayer prototype using vibinet for deterministic input sync.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:web": "vite build",
+    "build": "npm run build:web",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vibinet": "^0.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.1.1"
+  }
+}
