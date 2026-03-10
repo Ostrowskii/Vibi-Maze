@@ -233,7 +233,11 @@ function should_auto_start(state: TransportState): boolean {
     return false;
   }
   const players = connected_lobby_players(roster_list(state));
-  return players.length >= 2 && players.every((player) => player.ready);
+  return Boolean(
+    state.fullState.foxName &&
+    players.length >= 2 &&
+    players.every((player) => player.ready),
+  );
 }
 
 function sync_full_player(state: TransportState, transportPlayer: TransportPlayer): void {
@@ -304,7 +308,7 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
   const orderedActive = [...active].sort((left, right) => left.joinedAt - right.joinedAt);
   const foxName = next.fullState.foxName && orderedActive.some((player) => player.name === next.fullState.foxName)
     ? next.fullState.foxName
-    : orderedActive[Math.floor(rng() * orderedActive.length)]?.name ?? null;
+    : null;
 
   if (!foxName) {
     return base;
@@ -1085,7 +1089,11 @@ function build_lobby_state(players: Presence[], fullState: FullGameState): Lobby
     readyCount: connectedParticipants.filter((player) => player.ready).length,
     connectedParticipantCount: connectedParticipants.length,
     totalParticipantCount: participantCount,
-    allConnectedReady: connectedParticipants.length >= 2 && connectedParticipants.every((player) => player.ready),
+    allConnectedReady: Boolean(
+      fullState.foxName &&
+      connectedParticipants.length >= 2 &&
+      connectedParticipants.every((player) => player.ready),
+    ),
     foxName: fullState.foxName,
   };
 }

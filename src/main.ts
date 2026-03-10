@@ -198,6 +198,10 @@ root.addEventListener("click", async (event) => {
       break;
     case "start-game":
       if (!lastSync) return;
+      if (!lastSync.fullState.foxName) {
+        flash("Escolha uma raposa antes de iniciar.");
+        return;
+      }
       post_transport({ $: "start_game", name: lastSync.selfName, sessionId: activeSessionId, seed: random_seed() });
       break;
     case "back-to-lobby":
@@ -972,6 +976,7 @@ function render_action_panel(): string {
   if (!lastSync) return "";
   const self = self_presence();
   const foxButtonLabel = self?.role === "fox" ? "Deixar de ser raposa" : "Ser raposa";
+  const hasFox = Boolean(lastSync.fullState.foxName);
 
   if (lastSync.phase === "lobby") {
     return `
@@ -997,7 +1002,7 @@ function render_action_panel(): string {
             <button class="btn btn-secondary btn-block" data-action="open-editor" type="button" ${is_self_master() ? "" : "disabled"}>
               Abrir editor
             </button>
-            <button class="btn btn-primary btn-block" data-action="start-game" type="button" ${is_self_master() ? "" : "disabled"}>
+            <button class="btn btn-primary btn-block" data-action="start-game" type="button" ${is_self_master() && hasFox ? "" : "disabled"}>
               Play
             </button>
           </div>
