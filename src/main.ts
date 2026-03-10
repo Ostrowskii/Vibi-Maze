@@ -19,8 +19,10 @@ import {
   move_room,
   normalize_name,
   normalize_room,
+  pick_random_saved_maze,
   remove_room,
   reset_to_lobby,
+  saved_maze_count,
   start_game,
   sync_state_players,
   tick_transport_state,
@@ -211,6 +213,20 @@ root.addEventListener("click", async (event) => {
       publish_master_state();
       render();
       break;
+    case "random-map":
+      if (!masterState) return;
+      {
+        const maze = pick_random_saved_maze();
+        masterState = {
+          ...masterState,
+          rooms: maze.rooms,
+          corridors: maze.corridors,
+        };
+      }
+      flash(`Mapa aleatorio aplicado. Biblioteca: ${saved_maze_count()} mapas.`);
+      publish_master_state();
+      render();
+      break;
     case "editor-connect":
       uiState.connectSourceRoomId = uiState.selectedRoomId;
       render();
@@ -246,7 +262,7 @@ root.addEventListener("click", async (event) => {
       {
         const next = start_game(masterState, lastSync.players);
         if (!next) {
-          flash("Precisa de pelo menos 2 jogadores ativos além do mestre para iniciar.");
+          flash("Precisa de pelo menos 2 jogadores conectados para iniciar.");
           return;
         }
         masterState = next;
@@ -363,7 +379,7 @@ function sync_from_transport(): void {
     const fullSignature = JSON.stringify(nextSync.fullState);
     if (fullSignature !== lastServerFullSignature && !uiState.dragRoomId) {
       lastServerFullSignature = fullSignature;
-      if (!masterState || nextSync.masterName !== nextSync.selfName) {
+      if (!masterState || nextSync.controllerName !== nextSync.selfName) {
         masterState = clone_state(nextSync.fullState);
       }
     }
@@ -386,7 +402,7 @@ function on_sync(): void {
     return;
   }
 
-  if (is_self_master()) {
+  if (can_publish_state()) {
     const base = masterState ?? lastSync.fullState ?? create_empty_state(lastSync.room, lastSync.players, lastSync.masterName);
     const withRoster = sync_state_players(base, lastSync.players, lastSync.masterName);
     masterState = withRoster;
@@ -435,7 +451,7 @@ function flush_master_actions(): boolean {
 }
 
 function publish_master_state(consumedActionIds: string[] = []): void {
-  if (!lastSync || !masterState || !is_self_master()) {
+  if (!lastSync || !masterState || !can_publish_state()) {
     return;
   }
   const publicState = build_public_state(masterState, lastSync.players);
@@ -464,7 +480,7 @@ function handle_move(corridorId: string | null): void {
     return;
   }
 
-  if (is_self_master()) {
+  if (can_publish_state()) {
     if (!masterState) return;
     masterState = apply_move(masterState, actorName, corridorId);
     publish_master_state();
@@ -491,7 +507,7 @@ function handle_kill(targetName: string): void {
     return;
   }
 
-  if (is_self_master()) {
+  if (can_publish_state()) {
     if (!masterState) return;
     masterState = apply_kill_choice(masterState, actorName, targetName);
     publish_master_state();
@@ -530,7 +546,7 @@ function can_self_act(): boolean {
 }
 
 function can_master_override(): boolean {
-  if (!is_self_master() || !lastSync?.publicState?.currentTurnName) {
+  if (!can_publish_state() || !lastSync?.publicState?.currentTurnName) {
     return false;
   }
   const sync = lastSync;
@@ -740,12 +756,16 @@ function render_phase_content(): string {
 }
 
 function render_waiting_lobby(): string {
+  const canQuickStart = can_self_manage_lobby() && !is_self_master();
   return `
     <div class="empty-panel">
-      <h2>Aguardando mestre</h2>
+      <h2>${canQuickStart ? "Pronto para partida rapida" : "Aguardando mestre"}</h2>
       <p>
-        Quando alguem assumir o papel de mestre, essa pessoa vai editar o labirinto e escolher
-        quem sera a raposa.
+        ${
+          canQuickStart
+            ? "Ninguem virou mestre. Como primeiro jogador conectado, voce pode sortear um mapa salvo e iniciar com 2 ou mais pessoas."
+            : "Quando alguem assumir o papel de mestre, essa pessoa vai editar o labirinto e escolher quem sera a raposa."
+        }
       </p>
     </div>
   `;
@@ -753,6 +773,7 @@ function render_waiting_lobby(): string {
 
 function render_lobby_controls(): string {
   if (!lastSync) return "";
+  const canManageLobby = can_self_manage_lobby();
   const candidateNames = lastSync.players
     .filter((player) => !player.isMaster && player.seat === "participant")
     .sort((left, right) => left.joinedAt - right.joinedAt)
@@ -764,8 +785,9 @@ function render_lobby_controls(): string {
       <h2 class="section-title">Sala</h2>
       <p class="metric"><strong>Jogadores ativos:</strong> ${lastSync.players.filter((player) => player.seat === "participant").length}</p>
       <p class="metric"><strong>Mestre:</strong> ${escape_html(lastSync.masterName ?? "ninguem")}</p>
+      <p class="metric"><strong>Controller:</strong> ${escape_html(lastSync.controllerName ?? "aguardando jogadores")}</p>
       ${
-        is_self_master()
+        canManageLobby
           ? `
             <label class="field">
               <span>Raposa</span>
@@ -775,12 +797,18 @@ function render_lobby_controls(): string {
               </select>
             </label>
             <div class="button-row">
+              <button class="btn btn-secondary" data-action="random-map" type="button">Mapa aleatorio</button>
               <button class="btn btn-secondary" data-action="shuffle-fox" type="button">Sortear raposa</button>
               <button class="btn btn-primary" data-action="start-game" type="button">Play</button>
             </div>
+            ${
+              is_self_master()
+                ? '<p class="helper">Como mestre, voce tambem pode editar o labirinto manualmente.</p>'
+                : '<p class="helper">Sem mestre explicito, o primeiro jogador conectado controla apenas o sorteio e o inicio.</p>'
+            }
           `
           : `
-            <p class="helper">Voce continua esperando no lobby enquanto o mestre desenha o mapa.</p>
+            <p class="helper">Voce continua esperando no lobby enquanto o controller atual prepara a partida.</p>
           `
       }
     </section>
@@ -800,6 +828,7 @@ function render_master_editor(): string {
         <div class="button-row tight">
           <button class="btn btn-secondary" data-action="editor-add-room" type="button">Nova sala</button>
           <button class="btn btn-secondary" data-action="editor-default" type="button">Mapa 3x3</button>
+          <button class="btn btn-secondary" data-action="random-map" type="button">Mapa aleatorio</button>
         </div>
       </div>
       <svg class="editor-map" data-editor-svg viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
@@ -1281,6 +1310,18 @@ function self_presence(): Presence | null {
 
 function is_self_master(): boolean {
   return Boolean(lastSync && lastSync.masterName === lastSync.selfName);
+}
+
+function is_self_controller(): boolean {
+  return Boolean(lastSync && lastSync.controllerName === lastSync.selfName);
+}
+
+function can_publish_state(): boolean {
+  return is_self_controller();
+}
+
+function can_self_manage_lobby(): boolean {
+  return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
 }
 
 function role_label(role: string): string {

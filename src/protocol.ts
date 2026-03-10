@@ -120,6 +120,7 @@ export type RoomSync = {
   selfName: string;
   phase: RoomPhase;
   masterName: string | null;
+  controllerName: string | null;
   players: Presence[];
   publicState: PublicState | null;
   fullState: FullGameState | null;

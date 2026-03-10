@@ -28,6 +28,18 @@ const PRESENCE_COLORS = [
   "#f18f01",
 ];
 const HEARTBEAT_GRACE_TICKS = 24;
+const SAVED_MAZE_SEEDS = [
+  101, 207, 311, 419, 523, 631, 733, 839, 947, 1051,
+  1153, 1259, 1361, 1471, 1579, 1681, 1789, 1891, 1993, 2099,
+  2203, 2309, 2411, 2521, 2621, 2729, 2833, 2939, 3041, 3149,
+  3253, 3359, 3461, 3571, 3677, 3779, 3881, 3989, 4091, 4201,
+  4303, 4409, 4513, 4621, 4723, 4831, 4933, 5039, 5147, 5251,
+];
+const RANDOM_MAZE_EDGE_PAIRS: Array<[number, number]> = [
+  [1, 2], [2, 3], [4, 5], [5, 6], [7, 8], [8, 9],
+  [1, 4], [4, 7], [2, 5], [5, 8], [3, 6], [6, 9],
+  [1, 5], [5, 9], [2, 4], [2, 6], [4, 8], [6, 8], [3, 5], [5, 7],
+];
 
 function room_id(index: number): string {
   return `room-${index}`;
@@ -79,6 +91,15 @@ export function tick_transport_state(state: TransportState): TransportState {
   };
 }
 
+export function saved_maze_count(): number {
+  return SAVED_MAZE_SEEDS.length;
+}
+
+export function pick_random_saved_maze(): Pick<FullGameState, "rooms" | "corridors"> {
+  const seed = SAVED_MAZE_SEEDS[Math.floor(Math.random() * SAVED_MAZE_SEEDS.length)] ?? SAVED_MAZE_SEEDS[0];
+  return build_saved_maze(seed);
+}
+
 export function apply_transport_post(raw: string, state: TransportState): TransportState {
   let post: NetPost;
   try {
@@ -117,6 +138,7 @@ export function apply_transport_post(raw: string, state: TransportState): Transp
 
 export function derive_room_sync(room: string, selfName: string, state: TransportState): RoomSync {
   const consumed = new Set(state.consumedActionIds);
+  const controllerName = transport_controller_name(state);
   const players = Object.values(state.roster)
     .sort((left, right) => left.joinedAt - right.joinedAt)
     .map((player) => {
@@ -144,6 +166,7 @@ export function derive_room_sync(room: string, selfName: string, state: Transpor
     selfName,
     phase: state.phase,
     masterName: state.masterName,
+    controllerName,
     players,
     publicState: state.publicState,
     fullState: state.fullState,
@@ -210,7 +233,7 @@ function handle_claim_master_post(state: TransportState, post: Extract<NetPost, 
 }
 
 function handle_publish_state_post(state: TransportState, post: Extract<NetPost, { $: "publish_state" }>): TransportState {
-  if (state.masterName !== post.name || !is_current_session(state, post.name, post.sessionId)) {
+  if (transport_controller_name(state) !== post.name || !is_current_session(state, post.name, post.sessionId)) {
     return state;
   }
 
@@ -262,7 +285,7 @@ function handle_action_request_post(
     return state;
   }
 
-  if (actorName !== action.actorName && state.masterName !== actorName) {
+  if (actorName !== action.actorName && transport_controller_name(state) !== actorName) {
     return state;
   }
 
@@ -284,6 +307,124 @@ function is_transport_player_connected(state: TransportState, player: TransportP
     return false;
   }
   return state.clockTick - player.lastSeenTick <= HEARTBEAT_GRACE_TICKS;
+}
+
+function transport_controller_name(state: TransportState): string | null {
+  if (state.masterName) {
+    const master = state.roster[state.masterName];
+    if (master && is_transport_player_connected(state, master)) {
+      return state.masterName;
+    }
+  }
+
+  const fallback = Object.values(state.roster)
+    .filter((player) => player.seat === "participant" && is_transport_player_connected(state, player))
+    .sort((left, right) => left.joinedAt - right.joinedAt)[0];
+
+  return fallback?.name ?? null;
+}
+
+function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridors"> {
+  const rng = seeded_rng(seed);
+  const rooms = create_default_maze().rooms;
+  const corridors: Record<string, Corridor> = {};
+  const roomIds = Object.keys(rooms).sort();
+  const visited = new Set<string>();
+  const frontier: Array<[string, string]> = [];
+  const graph = edge_graph();
+
+  const startRoomId = room_id(1 + Math.floor(rng() * roomIds.length));
+  visited.add(startRoomId);
+  frontier.push(...graph.get(startRoomId) ?? []);
+
+  while (visited.size < roomIds.length && frontier.length > 0) {
+    const choiceIndex = Math.floor(rng() * frontier.length);
+    const [fromId, toId] = frontier.splice(choiceIndex, 1)[0] ?? [];
+    if (!fromId || !toId || visited.has(toId)) {
+      continue;
+    }
+    visited.add(toId);
+    const corridor = make_corridor(rooms[fromId], rooms[toId]);
+    corridors[corridor.id] = corridor;
+    for (const edge of graph.get(toId) ?? []) {
+      if (!visited.has(edge[1])) {
+        frontier.push(edge);
+      }
+    }
+  }
+
+  const extraEdges = shuffle_pairs(
+    RANDOM_MAZE_EDGE_PAIRS.map(([left, right]) => [room_id(left), room_id(right)] as [string, string]),
+    rng,
+  );
+  const extraCount = 3 + Math.floor(rng() * 5);
+  for (const [left, right] of extraEdges) {
+    if (Object.keys(corridors).length >= roomIds.length - 1 + extraCount) {
+      break;
+    }
+    const corridor = make_corridor(rooms[left], rooms[right]);
+    corridors[corridor.id] = corridor;
+  }
+
+  const shopCount = 1 + Math.floor(rng() * 3);
+  const shuffledRooms = shuffle_pairs(roomIds.map((id) => [id, id] as [string, string]), rng);
+  for (let index = 0; index < shopCount; index += 1) {
+    const roomName = shuffledRooms[index]?.[0];
+    if (roomName) {
+      rooms[roomName].type = "shop";
+    }
+  }
+
+  const loopCount = Math.floor(rng() * 2);
+  for (let index = 0; index < loopCount; index += 1) {
+    const roomName = shuffledRooms[shopCount + index]?.[0];
+    if (!roomName) {
+      continue;
+    }
+    const id = corridor_id(roomName, roomName);
+    corridors[id] = {
+      id,
+      fromRoomId: roomName,
+      toRoomId: roomName,
+      angleFrom: 0,
+      angleTo: 0,
+    };
+  }
+
+  return {
+    rooms,
+    corridors,
+  };
+}
+
+function edge_graph(): Map<string, Array<[string, string]>> {
+  const graph = new Map<string, Array<[string, string]>>();
+  for (const [left, right] of RANDOM_MAZE_EDGE_PAIRS) {
+    const leftId = room_id(left);
+    const rightId = room_id(right);
+    graph.set(leftId, [...(graph.get(leftId) ?? []), [leftId, rightId]]);
+    graph.set(rightId, [...(graph.get(rightId) ?? []), [rightId, leftId]]);
+  }
+  return graph;
+}
+
+function shuffle_pairs<T>(items: T[], rng: () => number): T[] {
+  const next = [...items];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(rng() * (index + 1));
+    const current = next[index];
+    next[index] = next[swapIndex] as T;
+    next[swapIndex] = current as T;
+  }
+  return next;
+}
+
+function seeded_rng(seed: number): () => number {
+  let value = seed >>> 0;
+  return () => {
+    value = (value * 1664525 + 1013904223) >>> 0;
+    return value / 4294967296;
+  };
 }
 
 export function compute_angle(from: MazeRoom, to: MazeRoom): number {

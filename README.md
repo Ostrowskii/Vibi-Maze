@@ -6,8 +6,11 @@ Branch `open-info`: as informacoes completas do jogo ficam abertas no stream com
 
 - entrada por `room` e `nome`;
 - lobby com eleicao de mestre;
+- partida rapida sem mestre explicito, usando controller implicito;
 - editor livre do mestre com salas, corredores, loop e mapa default 3x3;
+- biblioteca interna com 50 mapas salvos para sorteio;
 - escolha ou sorteio da raposa;
+- inicio com 2 jogadores ja suportado;
 - jogo por turnos com visao limitada na interface;
 - trilho lateral para acompanhar as telas dos jogadores;
 - espectador total para mortes e entradas tardias;
