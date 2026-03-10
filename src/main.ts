@@ -492,7 +492,7 @@ function render(): void {
     <main class="app-shell phase-${lastSync.phase}">
       ${render_left_sidebar()}
       <section class="main-column">
-        ${render_turn_banner()}
+        ${lastSync.phase === "lobby" ? "" : render_turn_banner()}
         ${lastSync.phase === "lobby" ? render_lobby_content() : render_game_content()}
       </section>
       <aside class="right-column">
@@ -564,6 +564,7 @@ function render_left_sidebar(): string {
   if (!lastSync) return "";
   const self = self_presence();
   const activeName = uiState.watchName ?? lastSync.selfName;
+  const readyText = `${lastSync.lobbyState?.readyCount ?? 0}/${lastSync.lobbyState?.connectedParticipantCount ?? 0} ready`;
 
   return `
     <aside class="left-sidebar">
@@ -572,6 +573,20 @@ function render_left_sidebar(): string {
           <span>Ping</span>
           <strong>${Math.round(game?.ping?.() ?? 0)} ms</strong>
         </div>
+        ${
+          lastSync.phase === "lobby"
+            ? `
+              <div class="mini-metric">
+                <span>Fase</span>
+                <strong>${escape_html(phase_label(lastSync.phase))}</strong>
+              </div>
+              <div class="mini-metric">
+                <span>Prontos</span>
+                <strong>${escape_html(readyText)}</strong>
+              </div>
+            `
+            : ""
+        }
         <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link</button>
         ${
           lastSync.phase === "lobby"
