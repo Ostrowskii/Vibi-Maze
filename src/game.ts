@@ -115,6 +115,8 @@ export function apply_transport_post(raw: string, state: TransportState): Transp
       return handle_heartbeat_post(state, post);
     case "claim_master":
       return handle_claim_master_post(state, post);
+    case "unclaim_master":
+      return handle_unclaim_master_post(state, post);
     case "publish_state":
       return handle_publish_state_post(state, post);
     case "submit_move":
@@ -229,6 +231,20 @@ function handle_claim_master_post(state: TransportState, post: Extract<NetPost, 
   const next = clone_state(state);
   next.masterName = post.name;
   next.message = `${post.name} virou mestre.`;
+  return next;
+}
+
+function handle_unclaim_master_post(state: TransportState, post: Extract<NetPost, { $: "unclaim_master" }>): TransportState {
+  if (state.phase !== "lobby" || state.masterName !== post.name || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+
+  const next = clone_state(state);
+  next.masterName = null;
+  next.message = `${post.name} deixou de ser mestre.`;
+  if (next.fullState) {
+    next.fullState.masterName = null;
+  }
   return next;
 }
 

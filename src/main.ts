@@ -162,11 +162,19 @@ root.addEventListener("click", async (event) => {
   switch (action) {
     case "claim-master":
       if (!lastSync) return;
-      post_transport({
-        $: "claim_master",
-        name: lastSync.selfName,
-        sessionId: activeSessionId,
-      });
+      post_transport(
+        is_self_master()
+          ? {
+              $: "unclaim_master",
+              name: lastSync.selfName,
+              sessionId: activeSessionId,
+            }
+          : {
+              $: "claim_master",
+              name: lastSync.selfName,
+              sessionId: activeSessionId,
+            },
+      );
       break;
     case "copy-link":
       await copy_room_link();
@@ -254,6 +262,12 @@ root.addEventListener("click", async (event) => {
     case "shuffle-fox":
       if (!masterState) return;
       masterState = choose_random_fox(masterState);
+      publish_master_state();
+      render();
+      break;
+    case "toggle-self-fox":
+      if (!masterState || !lastSync) return;
+      masterState = choose_fox(masterState, self_is_fox_candidate() ? "" : lastSync.selfName);
       publish_master_state();
       render();
       break;
@@ -638,6 +652,7 @@ function render(): void {
         ${render_roster_panel()}
         ${render_controls_panel()}
         ${render_connection_panel()}
+        ${render_action_panel()}
       </aside>
       ${render_modal()}
     </main>
@@ -691,10 +706,6 @@ function render_header(): string {
           Room <code>${escape_html(lastSync.room)}</code> • voce é
           <strong>${escape_html(role_label(role))}</strong>
         </p>
-      </div>
-      <div class="header-actions">
-        <button class="btn btn-secondary" data-action="copy-link" type="button">Copiar link</button>
-        ${lastSync.canClaimMaster ? '<button class="btn btn-primary" data-action="claim-master" type="button">Virar mestre</button>' : ""}
       </div>
     </header>
   `;
@@ -774,11 +785,6 @@ function render_waiting_lobby(): string {
 function render_lobby_controls(): string {
   if (!lastSync) return "";
   const canManageLobby = can_self_manage_lobby();
-  const candidateNames = lastSync.players
-    .filter((player) => !player.isMaster && player.seat === "participant")
-    .sort((left, right) => left.joinedAt - right.joinedAt)
-    .map((player) => `<option value="${escape_html(player.name)}">${escape_html(player.name)}</option>`)
-    .join("");
 
   return `
     <section class="stack">
@@ -789,22 +795,10 @@ function render_lobby_controls(): string {
       ${
         canManageLobby
           ? `
-            <label class="field">
-              <span>Raposa</span>
-              <select data-action="fox-select">
-                <option value="">Escolher depois</option>
-                ${candidateNames}
-              </select>
-            </label>
-            <div class="button-row">
-              <button class="btn btn-secondary" data-action="random-map" type="button">Mapa aleatorio</button>
-              <button class="btn btn-secondary" data-action="shuffle-fox" type="button">Sortear raposa</button>
-              <button class="btn btn-primary" data-action="start-game" type="button">Play</button>
-            </div>
             ${
               is_self_master()
                 ? '<p class="helper">Como mestre, voce tambem pode editar o labirinto manualmente.</p>'
-                : '<p class="helper">Sem mestre explicito, o primeiro jogador conectado controla apenas o sorteio e o inicio.</p>'
+                : '<p class="helper">Sem mestre explicito, o primeiro jogador conectado controla o lobby e o sorteio do mapa.</p>'
             }
           `
           : `
@@ -1101,6 +1095,67 @@ function render_connection_panel(): string {
   `;
 }
 
+function render_action_panel(): string {
+  if (!lastSync) return "";
+
+  const lobby = lastSync.phase === "lobby";
+  const canManageLobby = can_self_manage_lobby();
+  const hasMaster = Boolean(lastSync.masterName);
+  const selfCanToggleMaster = !hasMaster || is_self_master();
+  const selfParticipant = self_presence()?.seat === "participant";
+  const masterButtonLabel = is_self_master() ? "Deixar de ser mestre" : "Virar mestre";
+  const foxButtonLabel = self_is_fox_candidate() ? "Deixar de ser raposa" : "Se tornar raposa";
+
+  return `
+    <section class="panel stack">
+      <h2 class="section-title">Acoes</h2>
+      <div class="action-stack">
+        <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link da sala</button>
+        <button
+          class="btn ${is_self_master() ? "btn-danger" : "btn-primary"} btn-block"
+          data-action="claim-master"
+          type="button"
+          ${lobby && selfCanToggleMaster ? "" : "disabled"}
+        >
+          ${masterButtonLabel}
+        </button>
+        <button
+          class="btn btn-secondary btn-block"
+          data-action="random-map"
+          type="button"
+          ${lobby && canManageLobby ? "" : "disabled"}
+        >
+          Mapa aleatorio
+        </button>
+        <button
+          class="btn btn-secondary btn-block"
+          data-action="shuffle-fox"
+          type="button"
+          ${lobby && canManageLobby ? "" : "disabled"}
+        >
+          Sortear raposa
+        </button>
+        <button
+          class="btn btn-secondary btn-block"
+          data-action="toggle-self-fox"
+          type="button"
+          ${lobby && canManageLobby && selfParticipant ? "" : "disabled"}
+        >
+          ${foxButtonLabel}
+        </button>
+        <button
+          class="btn btn-primary btn-block"
+          data-action="start-game"
+          type="button"
+          ${lobby && canManageLobby ? "" : "disabled"}
+        >
+          Play
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function render_side_rail(): string {
   if (!lastSync?.publicState) {
     return `<aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}"></aside>`;
@@ -1329,6 +1384,10 @@ function can_self_manage_lobby(): boolean {
 
 function can_edit_lobby_map(): boolean {
   return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
+}
+
+function self_is_fox_candidate(): boolean {
+  return Boolean(lastSync && masterState && masterState.foxCandidateName === lastSync.selfName);
 }
 
 function role_label(role: string): string {

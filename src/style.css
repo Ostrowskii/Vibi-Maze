@@ -96,6 +96,11 @@ button {
   gap: 14px;
 }
 
+.action-stack {
+  display: grid;
+  gap: 10px;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -126,6 +131,12 @@ button {
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.btn-block {
+  width: 100%;
+  display: flex;
+  justify-content: center;
 }
 
 .btn-primary {

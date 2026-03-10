@@ -137,6 +137,7 @@ export type NetPost =
   | { $: "join_room"; name: string; sessionId: string }
   | { $: "heartbeat"; name: string; sessionId: string }
   | { $: "claim_master"; name: string; sessionId: string }
+  | { $: "unclaim_master"; name: string; sessionId: string }
   | {
       $: "publish_state";
       name: string;
