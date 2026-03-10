@@ -347,7 +347,7 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
   const roomIds = Object.keys(rooms).sort();
   const visited = new Set<string>();
   const frontier: Array<[string, string]> = [];
-  const graph = edge_graph();
+  const graph = edge_graph(rooms);
 
   const startRoomId = room_id(1 + Math.floor(rng() * roomIds.length));
   visited.add(startRoomId);
@@ -370,7 +370,7 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
   }
 
   const extraEdges = shuffle_pairs(
-    RANDOM_MAZE_EDGE_PAIRS.map(([left, right]) => [room_id(left), room_id(right)] as [string, string]),
+    graph_edges(graph),
     rng,
   );
   const extraCount = 3 + Math.floor(rng() * 5);
@@ -407,33 +407,10 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
     };
   }
 
-  add_extreme_wrap_corridors(rooms, corridors);
-
   return {
     rooms,
     corridors,
   };
-}
-
-function add_extreme_wrap_corridors(
-  rooms: Record<string, MazeRoom>,
-  corridors: Record<string, Corridor>,
-): void {
-  const roomList = Object.values(rooms);
-  if (roomList.length < 2) {
-    return;
-  }
-
-  const centerX = roomList.reduce((sum, room) => sum + room.x, 0) / roomList.length;
-  const centerY = roomList.reduce((sum, room) => sum + room.y, 0) / roomList.length;
-
-  const leftRoom = pick_extreme_room(roomList, "x", 1, centerY, "y");
-  const rightRoom = pick_extreme_room(roomList, "x", -1, centerY, "y");
-  const topRoom = pick_extreme_room(roomList, "y", 1, centerX, "x");
-  const bottomRoom = pick_extreme_room(roomList, "y", -1, centerX, "x");
-
-  add_corridor_if_missing(corridors, leftRoom, rightRoom);
-  add_corridor_if_missing(corridors, topRoom, bottomRoom);
 }
 
 function pick_extreme_room(
@@ -458,28 +435,61 @@ function pick_extreme_room(
   return ordered[0] ?? null;
 }
 
-function add_corridor_if_missing(
-  corridors: Record<string, Corridor>,
-  leftRoom: MazeRoom | null,
-  rightRoom: MazeRoom | null,
-): void {
-  if (!leftRoom || !rightRoom || leftRoom.id === rightRoom.id) {
-    return;
-  }
-
-  const corridor = make_corridor(leftRoom, rightRoom);
-  corridors[corridor.id] = corridor;
-}
-
-function edge_graph(): Map<string, Array<[string, string]>> {
+function edge_graph(rooms: Record<string, MazeRoom>): Map<string, Array<[string, string]>> {
   const graph = new Map<string, Array<[string, string]>>();
-  for (const [left, right] of RANDOM_MAZE_EDGE_PAIRS) {
-    const leftId = room_id(left);
-    const rightId = room_id(right);
+  const candidatePairs = [
+    ...RANDOM_MAZE_EDGE_PAIRS.map(([left, right]) => [room_id(left), room_id(right)] as [string, string]),
+    ...extreme_wrap_pairs(rooms),
+  ];
+
+  for (const [leftId, rightId] of candidatePairs) {
     graph.set(leftId, [...(graph.get(leftId) ?? []), [leftId, rightId]]);
     graph.set(rightId, [...(graph.get(rightId) ?? []), [rightId, leftId]]);
   }
   return graph;
+}
+
+function extreme_wrap_pairs(rooms: Record<string, MazeRoom>): Array<[string, string]> {
+  const roomList = Object.values(rooms);
+  if (roomList.length < 2) {
+    return [];
+  }
+
+  const centerX = roomList.reduce((sum, room) => sum + room.x, 0) / roomList.length;
+  const centerY = roomList.reduce((sum, room) => sum + room.y, 0) / roomList.length;
+
+  const leftRoom = pick_extreme_room(roomList, "x", 1, centerY, "y");
+  const rightRoom = pick_extreme_room(roomList, "x", -1, centerY, "y");
+  const topRoom = pick_extreme_room(roomList, "y", 1, centerX, "x");
+  const bottomRoom = pick_extreme_room(roomList, "y", -1, centerX, "x");
+
+  const pairs: Array<[string, string]> = [];
+  if (leftRoom && rightRoom && leftRoom.id !== rightRoom.id) {
+    pairs.push([leftRoom.id, rightRoom.id]);
+  }
+  if (topRoom && bottomRoom && topRoom.id !== bottomRoom.id) {
+    pairs.push([topRoom.id, bottomRoom.id]);
+  }
+  return pairs;
+}
+
+function graph_edges(graph: Map<string, Array<[string, string]>>): Array<[string, string]> {
+  const seen = new Set<string>();
+  const edges: Array<[string, string]> = [];
+
+  for (const entries of graph.values()) {
+    for (const [left, right] of entries) {
+      const [a, b] = normalized_id_pair(left, right);
+      const key = `${a}:${b}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      edges.push([a, b]);
+    }
+  }
+
+  return edges;
 }
 
 function shuffle_pairs<T>(items: T[], rng: () => number): T[] {
