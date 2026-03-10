@@ -875,7 +875,8 @@ function render_room_view_panel(): string {
 
   const controlActorName = action_actor_name();
   const isControlledView = controlActorName === watchedName;
-  const canMove = isControlledView && lastSync.publicState.pendingKillTargets.length === 0;
+  const killMode = lastSync.publicState.pendingKillMode;
+  const canMove = isControlledView && killMode !== "forced";
   const canKill = isControlledView && lastSync.publicState.pendingKillTargets.length > 0;
 
   return `
@@ -895,21 +896,30 @@ function render_room_view_panel(): string {
       ${render_scene(view, canMove)}
       ${
         canKill
-          ? render_kill_picker(lastSync.publicState.pendingKillTargets)
+          ? render_kill_picker(lastSync.publicState.pendingKillTargets, killMode)
           : `
             <div class="button-row">
               <button class="btn btn-secondary" data-action="submit-pass" type="button" ${canMove ? "" : "disabled"}>Passar</button>
             </div>
           `
       }
+      ${
+        canKill && canMove
+          ? `
+            <div class="button-row">
+              <button class="btn btn-secondary" data-action="submit-pass" type="button">Passar</button>
+            </div>
+          `
+          : ""
+      }
     </section>
   `;
 }
 
-function render_kill_picker(targets: string[]): string {
+function render_kill_picker(targets: string[], mode: "optional" | "forced" | null): string {
   return `
     <div class="kill-picker">
-      <strong>Raposa escolhe quem cai:</strong>
+      <strong>${escape_html(mode === "optional" ? "Raposa pode comer alguém nesta sala:" : "Raposa escolhe quem cai:")}</strong>
       <div class="button-row">
         ${targets
           .map((target) => `

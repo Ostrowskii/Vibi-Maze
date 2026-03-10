@@ -355,6 +355,7 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
   next.fullState.currentTurnName = henOrder[0] ?? foxName;
   next.fullState.henOrder = henOrder;
   next.fullState.pendingKillTargets = [];
+  next.fullState.pendingKillMode = null;
   next.fullState.foxName = foxName;
   append_system_entry(next.fullState, null, reason);
   return next;
@@ -368,6 +369,7 @@ function reset_to_lobby_state(base: TransportState, actorName: string | null, te
   next.fullState.currentTurnName = null;
   next.fullState.henOrder = [];
   next.fullState.pendingKillTargets = [];
+  next.fullState.pendingKillMode = null;
   next.fullState.foxName = null;
   for (const player of Object.values(next.fullState.players)) {
     player.alive = false;
@@ -406,7 +408,22 @@ function declare_winner(state: FullGameState, winner: "fox" | "hens", text: stri
   state.winner = winner;
   state.currentTurnName = null;
   state.pendingKillTargets = [];
+  state.pendingKillMode = null;
   append_system_entry(state, state.foxName, text);
+  return state;
+}
+
+function set_fox_turn_targets(state: FullGameState, mode: "forced" | "optional"): FullGameState {
+  if (!state.foxName) {
+    state.pendingKillTargets = [];
+    state.pendingKillMode = null;
+    return state;
+  }
+
+  const fox = state.players[state.foxName];
+  const targets = living_hens_in_room(state, fox?.locationRoomId ?? null);
+  state.pendingKillTargets = targets;
+  state.pendingKillMode = targets.length > 0 ? mode : null;
   return state;
 }
 
@@ -443,6 +460,12 @@ function advance_turn(state: FullGameState): FullGameState {
   }
 
   state.pendingKillTargets = [];
+  state.pendingKillMode = null;
+
+  if (state.currentTurnName && state.currentTurnName === state.foxName) {
+    return set_fox_turn_targets(state, "optional");
+  }
+
   return state;
 }
 
@@ -454,6 +477,7 @@ function eliminate_hen(state: FullGameState, targetName: string): FullGameState 
   target.alive = false;
   target.hasFullInfo = true;
   state.pendingKillTargets = [];
+  state.pendingKillMode = null;
   append_system_entry(state, state.foxName, `${targetName} foi capturada.`);
 
   const anyHenAlive = Object.values(state.players).some((player) => player.role === "hen" && player.alive);
@@ -577,6 +601,7 @@ export function create_empty_state(masterName: string | null = null): FullGameSt
     corridors,
     henOrder: [],
     pendingKillTargets: [],
+    pendingKillMode: null,
     feed: [],
   };
 }
@@ -1125,6 +1150,7 @@ export function build_public_state(state: FullGameState, roster: Presence[]): Pu
     screens,
     watchOrder,
     pendingKillTargets: [...state.pendingKillTargets],
+    pendingKillMode: state.pendingKillMode,
   };
 }
 
@@ -1158,7 +1184,11 @@ export function exits_for_room(state: FullGameState, roomId: string): ExitInfo[]
 }
 
 export function apply_move(state: TransportState, actorName: string, corridorId: string | null): TransportState {
-  if (state.fullState.phase !== "running" || state.fullState.currentTurnName !== actorName || state.fullState.pendingKillTargets.length > 0) {
+  if (
+    state.fullState.phase !== "running" ||
+    state.fullState.currentTurnName !== actorName ||
+    (state.fullState.pendingKillTargets.length > 0 && state.fullState.pendingKillMode === "forced")
+  ) {
     return state;
   }
 
@@ -1166,6 +1196,11 @@ export function apply_move(state: TransportState, actorName: string, corridorId:
   const actor = next.fullState.players[actorName];
   if (!actor || !actor.alive) {
     return state;
+  }
+
+  if (actor.role === "fox" && next.fullState.pendingKillMode === "optional") {
+    next.fullState.pendingKillTargets = [];
+    next.fullState.pendingKillMode = null;
   }
 
   if (corridorId === null) {
@@ -1199,6 +1234,7 @@ export function apply_move(state: TransportState, actorName: string, corridorId:
       return next;
     }
     next.fullState.pendingKillTargets = targets;
+    next.fullState.pendingKillMode = "forced";
     return next;
   }
 

@@ -5,6 +5,7 @@ export type PlayerRole = "master" | "fox" | "hen" | "spectator";
 export type SeatType = "participant" | "spectator";
 export type FeedKind = "chat" | "system";
 export type WinnerSide = "fox" | "hens" | null;
+export type KillWindowMode = "forced" | "optional" | null;
 
 export type Presence = {
   name: string;
@@ -64,6 +65,7 @@ export type FullGameState = {
   corridors: Record<string, Corridor>;
   henOrder: string[];
   pendingKillTargets: string[];
+  pendingKillMode: KillWindowMode;
   feed: FeedEntry[];
 };
 
@@ -99,6 +101,7 @@ export type PublicState = {
   screens: Record<string, LimitedPlayerView>;
   watchOrder: string[];
   pendingKillTargets: string[];
+  pendingKillMode: KillWindowMode;
 };
 
 export type LobbyState = {
