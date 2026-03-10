@@ -1,0 +1,59 @@
+Prompt principal usado para construir o game Vibi-Maze
+
+Crie um game web multiplayer chamado Vibi-Maze. Use Vite + TypeScript no frontend e VibiNet como transporte multiplayer. Nesta versao, o modo de rede deve ser open-info: as informacoes do jogo podem ficar abertas no estado compartilhado, mas a UI so deve mostrar para cada jogador as informacoes que ele deveria enxergar durante a partida.
+
+Fluxo geral:
+- O jogador entra com room + nome.
+- Existe um lobby antes do inicio da partida.
+- O papel de mestre deve ser opcional.
+- Se alguem clicar para virar mestre, essa pessoa vira mestre e pode deixar de ser mestre depois.
+- Se ninguem virar mestre, o primeiro jogador conectado atua como controller implicito do lobby.
+- O jogo deve funcionar com apenas 2 players.
+
+Lobby:
+- Mostrar lista de jogadores com nome, cor e papel.
+- Ter uma secao de acoes com botoes de largura total.
+- Botoes desejados: copiar link da sala, virar mestre/deixar de ser mestre, mapa aleatorio, sortear raposa, se tornar raposa/deixar de ser raposa, acompanhar a vez/parar de acompanhar a vez e play.
+- Novos jogadores podem entrar mesmo depois do inicio, mas entram como espectadores e nao participam da rodada atual.
+
+Editor e mapas:
+- O labirinto e composto por rooms e corredores.
+- O mestre, quando existir, pode editar o mapa antes do play.
+- Deve existir um mapa default 3x3 com conexoes ortogonais entre salas vizinhas e duas diagonais: superior-esquerda -> centro e centro -> inferior-direita.
+- Rooms devem ter pelo menos os tipos normal e loja.
+- Tambem devem existir 50 mapas aleatorios salvos no game.
+- Deve existir um botao de mapa aleatorio para sortear um desses mapas.
+- Os mapas aleatorios podem, aleatoriamente, incluir conexoes entre a sala mais a esquerda e a mais a direita, e entre a sala mais acima e a mais abaixo, mas isso nao deve ser forcado em todos os mapas.
+
+Regras da partida:
+- Um player e a raposa e os outros sao galinhas.
+- O mestre nao precisa jogar.
+- Quando a partida comeca, o controller da rodada define aleatoriamente a posicao inicial dos jogadores no mapa.
+- Os jogadores comuns nao devem ver o mapa completo pela UI.
+- Cada jogador vivo deve ver apenas:
+  - o tipo da sala atual;
+  - a lista de players na mesma sala;
+  - a lista de direcoes disponiveis em graus.
+- A raposa vence ao eliminar todas as galinhas.
+- Quando a raposa cai na mesma sala das galinhas, ela mata uma por vez.
+- A ordem de turnos deve permitir que as galinhas joguem e depois a raposa.
+
+UI do jogo:
+- A area principal do jogador deve ser um retangulo mais largo do que alto.
+- Dentro dela, mostrar stickmen coloridos para os players presentes na sala atual.
+- Mostrar nome e cor de cada player.
+- As direcoes disponiveis devem aparecer como botoes de seta clicaveis, sem sobreposicao.
+- Na lateral direita, manter paineis de conexao, acoes e lista de jogadores.
+- Na lateral esquerda, usar uma aba retratil em formato de dock fino.
+- Quando a aba esquerda estiver fechada, ela deve mostrar apenas um icone de tela, bem pequeno, com pouco padding.
+- Quando estiver aberta, ela deve listar as telas/visoes que podem ser acompanhadas.
+- O usuario pode acompanhar ou nao a tela de quem esta na vez.
+- A tecla Esc deve servir para voltar para a propria tela.
+
+Publicacao:
+- O projeto deve ficar pronto para GitHub Pages sem GitHub Actions.
+- O site publicado deve sair de docs/.
+- Sempre que for necessario publicar uma mudanca visual, rebuildar o docs antes de subir.
+
+Observacao importante:
+- Neste modo open-info, a ocultacao e apenas de interface. O estado completo pode existir no cliente, mas a UI deve esconder o que cada jogador nao deveria ver.
