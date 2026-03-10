@@ -643,6 +643,7 @@ function render_roster_item(player: Presence, activeName: string): string {
 
 function render_lobby_content(): string {
   if (!lastSync) return "";
+  const showLobbyMapPreview = is_self_master();
   return `
     <section class="lobby-layout">
       <section class="panel stack spacious">
@@ -677,12 +678,26 @@ function render_lobby_content(): string {
           ${
             is_self_master()
               ? "Voce e o mestre. Use o botao ou aperte M para abrir o editor do mapa."
-              : "O lobby nao mostra telas para assistir. Aqui voce organiza papeis, ready e conversa antes da partida."
+              : "O mapa fica oculto no lobby para jogadores normais. Aqui voce organiza papeis, ready e conversa antes da partida."
           }
         </div>
-        <svg class="editor-map readonly" viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
-          ${render_maze_svg(lastSync.fullState, false)}
-        </svg>
+        ${
+          showLobbyMapPreview
+            ? `
+              <svg class="editor-map readonly" viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
+                ${render_maze_svg(lastSync.fullState, false)}
+              </svg>
+            `
+            : `
+              <div class="fog-card">
+                <div class="fog-copy">
+                  <p class="eyebrow">Fog Of War</p>
+                  <h3>Mapa oculto</h3>
+                  <p class="helper">So o mestre enxerga a pre-visualizacao do labirinto no lobby.</p>
+                </div>
+              </div>
+            `
+        }
       </section>
     </section>
   `;
@@ -970,14 +985,18 @@ function render_feed_panel(): string {
 }
 
 function render_feed_entry(entry: FeedEntry): string {
-  const isSelf = entry.actorName && entry.actorName === lastSync?.selfName;
+  const isSelf = entry.kind === "chat" && entry.actorName && entry.actorName === lastSync?.selfName;
+  if (entry.kind === "system") {
+    return `
+      <article class="feed-entry system">
+        <p class="feed-line"><strong>sistema</strong> - ${escape_html(entry.text)}</p>
+      </article>
+    `;
+  }
+
   return `
-    <article class="feed-entry ${entry.kind} ${isSelf ? "is-self" : ""}">
-      <header>
-        <strong>${escape_html(entry.kind === "chat" ? entry.actorName ?? "anon" : "sistema")}</strong>
-        <span>${entry.kind === "chat" ? "fala" : "acao"}</span>
-      </header>
-      <p>${escape_html(entry.text)}</p>
+    <article class="feed-entry chat ${isSelf ? "is-self" : ""}">
+      <p class="feed-line"><strong>${escape_html(entry.actorName ?? "anon")}</strong> - ${escape_html(entry.text)}</p>
     </article>
   `;
 }
