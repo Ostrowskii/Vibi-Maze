@@ -691,7 +691,6 @@ function render_lobby_content(): string {
             : `
               <div class="fog-card">
                 <div class="fog-copy">
-                  <p class="eyebrow">Fog Of War</p>
                   <h3>Mapa oculto</h3>
                   <p class="helper">So o mestre enxerga a pre-visualizacao do labirinto no lobby.</p>
                 </div>
