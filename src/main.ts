@@ -1087,7 +1087,6 @@ function render_connection_panel(): string {
   return `
     <section class="panel stack">
       <h2 class="section-title">Conexao</h2>
-      <p class="metric"><strong>Servidor:</strong> ${escape_html(resolve_ws_url())}</p>
       <p class="metric"><strong>Estado:</strong> ${escape_html(socketState)}</p>
       <p class="metric"><strong>Ping:</strong> ${Math.round(game?.ping?.() ?? 0)} ms</p>
       ${lastSync.message ? `<p class="notice">${escape_html(lastSync.message)}</p>` : ""}
