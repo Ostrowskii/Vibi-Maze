@@ -639,7 +639,6 @@ function render(): void {
     <main class="app-shell">
       ${render_side_rail()}
       <section class="main-column">
-        ${render_header()}
         ${render_turn_banner()}
         ${render_phase_content()}
       </section>
@@ -683,25 +682,6 @@ function render_join_screen(): string {
         ${uiState.toast ? `<p class="toast">${escape_html(uiState.toast)}</p>` : ""}
       </section>
     </main>
-  `;
-}
-
-function render_header(): string {
-  if (!lastSync) return "";
-  const self = self_presence();
-  const role = self?.role ?? "player";
-
-  return `
-    <header class="header-card">
-      <div>
-        <p class="eyebrow">Open Info / UI Oculta</p>
-        <h1 class="title">Vibi-Maze</h1>
-        <p class="subtitle">
-          Room <code>${escape_html(lastSync.room)}</code> • voce é
-          <strong>${escape_html(role_label(role))}</strong>
-        </p>
-      </div>
-    </header>
   `;
 }
 
