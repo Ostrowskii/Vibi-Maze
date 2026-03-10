@@ -63,9 +63,6 @@
           ${h(t?.name??"Aguardando")}
         </strong>
       </div>
-      <button class="btn btn-secondary" data-action="toggle-follow-turn" type="button">
-        ${l.followTurn?"Parar de acompanhar a vez":"Acompanhar a vez"}
-      </button>
     </section>
   `}function Mn(){return a?a.phase==="lobby"?`
       <section class="phase-grid">
@@ -270,6 +267,9 @@
       <h2 class="section-title">Acoes</h2>
       <div class="action-stack">
         <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link da sala</button>
+        <button class="btn btn-secondary btn-block" data-action="toggle-follow-turn" type="button">
+          ${l.followTurn?"Parar de acompanhar a vez":"Acompanhar a vez"}
+        </button>
         <button
           class="btn ${T()?"btn-danger":"btn-primary"} btn-block"
           data-action="claim-master"
