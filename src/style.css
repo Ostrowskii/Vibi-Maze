@@ -263,6 +263,49 @@ textarea {
   gap: 16px;
 }
 
+.result-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+}
+
+.result-panel.fox {
+  background: linear-gradient(135deg, rgba(157, 60, 52, 0.95), rgba(92, 37, 31, 0.95));
+  color: #fff7ec;
+}
+
+.result-panel.hens {
+  background: linear-gradient(135deg, rgba(84, 127, 59, 0.95), rgba(44, 92, 53, 0.95));
+  color: #f8ffef;
+}
+
+.result-panel.neutral {
+  background: linear-gradient(135deg, rgba(26, 104, 108, 0.95), rgba(18, 53, 58, 0.95));
+  color: #f5fbfc;
+}
+
+.result-panel .eyebrow,
+.result-panel .helper {
+  color: inherit;
+  opacity: 0.88;
+}
+
+.result-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.result-title,
+.result-text {
+  margin: 0;
+}
+
+.result-title {
+  font-size: clamp(1.8rem, 3vw, 2.4rem);
+}
+
 .lobby-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -593,6 +636,11 @@ textarea {
 
   .lobby-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .result-panel {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

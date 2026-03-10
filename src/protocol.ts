@@ -4,6 +4,7 @@ export type RoomType = "normal" | "shop";
 export type PlayerRole = "master" | "fox" | "hen" | "spectator";
 export type SeatType = "participant" | "spectator";
 export type FeedKind = "chat" | "system";
+export type WinnerSide = "fox" | "hens" | null;
 
 export type Presence = {
   name: string;
@@ -55,6 +56,7 @@ export type FullGameState = {
   phase: RoomPhase;
   masterName: string | null;
   foxName: string | null;
+  winner: WinnerSide;
   round: number;
   currentTurnName: string | null;
   players: Record<string, FullPlayerState>;

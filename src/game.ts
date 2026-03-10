@@ -350,6 +350,7 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
   }
 
   next.fullState.phase = "running";
+  next.fullState.winner = null;
   next.fullState.round = 1;
   next.fullState.currentTurnName = henOrder[0] ?? foxName;
   next.fullState.henOrder = henOrder;
@@ -362,6 +363,7 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
 function reset_to_lobby_state(base: TransportState, actorName: string | null, text: string): TransportState {
   const next = clone_state(base);
   next.fullState.phase = "lobby";
+  next.fullState.winner = null;
   next.fullState.round = 0;
   next.fullState.currentTurnName = null;
   next.fullState.henOrder = [];
@@ -395,6 +397,19 @@ function living_hens_in_room(state: FullGameState, roomId: string | null): strin
     .map((player) => player.name);
 }
 
+function hen_round_limit(state: FullGameState): number {
+  return Math.max(1, state.henOrder.length) * 10;
+}
+
+function declare_winner(state: FullGameState, winner: "fox" | "hens", text: string): FullGameState {
+  state.phase = "game_over";
+  state.winner = winner;
+  state.currentTurnName = null;
+  state.pendingKillTargets = [];
+  append_system_entry(state, state.foxName, text);
+  return state;
+}
+
 function advance_turn(state: FullGameState): FullGameState {
   const livingHens = state.henOrder.filter((name) => state.players[name]?.alive);
   const order = [
@@ -404,6 +419,7 @@ function advance_turn(state: FullGameState): FullGameState {
 
   if (order.length === 0) {
     state.phase = "game_over";
+    state.winner = null;
     state.currentTurnName = null;
     append_system_entry(state, null, "Partida encerrada.");
     return state;
@@ -414,6 +430,13 @@ function advance_turn(state: FullGameState): FullGameState {
 
   if (currentIndex === -1 || nextIndex >= order.length) {
     state.round = Math.max(1, state.round) + (currentIndex === -1 ? 0 : 1);
+    if (state.round > hen_round_limit(state)) {
+      return declare_winner(
+        state,
+        "hens",
+        `As galinhas sobreviveram por mais de ${hen_round_limit(state)} rodadas e venceram.`,
+      );
+    }
     state.currentTurnName = order[0] ?? null;
   } else {
     state.currentTurnName = order[nextIndex] ?? null;
@@ -435,10 +458,7 @@ function eliminate_hen(state: FullGameState, targetName: string): FullGameState 
 
   const anyHenAlive = Object.values(state.players).some((player) => player.role === "hen" && player.alive);
   if (!anyHenAlive) {
-    state.phase = "game_over";
-    state.currentTurnName = null;
-    append_system_entry(state, state.foxName, "A raposa venceu a partida.");
-    return state;
+    return declare_winner(state, "fox", "A raposa eliminou todas as galinhas e venceu a partida.");
   }
 
   return advance_turn(state);
@@ -549,6 +569,7 @@ export function create_empty_state(masterName: string | null = null): FullGameSt
     phase: "lobby",
     masterName,
     foxName: null,
+    winner: null,
     round: 0,
     currentTurnName: null,
     players: {},

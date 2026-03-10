@@ -48,6 +48,7 @@ const VIEWBOX_WIDTH = 900;
 const VIEWBOX_HEIGHT = 660;
 const SYNC_INTERVAL_MS = 200;
 const HEARTBEAT_INTERVAL_MS = 2500;
+const GAME_OVER_NOTICE_MS = 4200;
 const TRANSPORT_PACKER = { $: "String" } as const;
 const query = new URLSearchParams(window.location.search);
 
@@ -72,6 +73,7 @@ let activeName: string | null = null;
 let activeSessionId = ensure_session_id();
 let syncLoopId: number | null = null;
 let heartbeatLoopId: number | null = null;
+let returnToLobbyTimerId: number | null = null;
 let sharedState: TransportState | null = null;
 let lastSync: RoomSync | null = null;
 let lastSyncSignature = "";
@@ -291,6 +293,7 @@ function join_room(): void {
   lastSyncSignature = "";
   sharedState = null;
   editorState = null;
+  clear_return_to_lobby_timer();
   uiState.watchName = null;
   uiState.revealFullMap = false;
   uiState.editorOpen = false;
@@ -380,6 +383,12 @@ function on_sync(): void {
     uiState.editorOpen = false;
     editorState = null;
   }
+
+  if (lastSync.phase === "game_over") {
+    schedule_return_to_lobby();
+  } else {
+    clear_return_to_lobby_timer();
+  }
 }
 
 function post_transport(post: NetPost): void {
@@ -426,6 +435,31 @@ function close_transport(): void {
   game?.close();
   game = null;
   socketState = "closed";
+  clear_return_to_lobby_timer();
+}
+
+function schedule_return_to_lobby(): void {
+  if (returnToLobbyTimerId !== null || !lastSync) {
+    return;
+  }
+  returnToLobbyTimerId = window.setTimeout(() => {
+    returnToLobbyTimerId = null;
+    if (!lastSync || lastSync.phase !== "game_over") {
+      return;
+    }
+    post_transport({
+      $: "return_to_lobby",
+      name: lastSync.selfName,
+      sessionId: activeSessionId,
+    });
+  }, GAME_OVER_NOTICE_MS);
+}
+
+function clear_return_to_lobby_timer(): void {
+  if (returnToLobbyTimerId !== null) {
+    window.clearTimeout(returnToLobbyTimerId);
+    returnToLobbyTimerId = null;
+  }
 }
 
 function ensure_session_id(): string {
@@ -657,9 +691,37 @@ function render_lobby_content(): string {
 function render_game_content(): string {
   return `
     <section class="game-layout">
+      ${lastSync?.phase === "game_over" ? render_result_panel() : ""}
       <section class="panel spacious">
         ${should_show_full_map() ? render_full_map_panel() : render_room_view_panel()}
       </section>
+    </section>
+  `;
+}
+
+function render_result_panel(): string {
+  if (!lastSync || lastSync.phase !== "game_over") {
+    return "";
+  }
+
+  const winner = lastSync.fullState.winner;
+  const winnerLabel = winner === "fox" ? "A raposa venceu" : winner === "hens" ? "As galinhas venceram" : "Partida encerrada";
+  const winnerClass = winner === "fox" ? "fox" : winner === "hens" ? "hens" : "neutral";
+  const reason = winner === "fox"
+    ? "Todas as galinhas foram capturadas."
+    : winner === "hens"
+      ? `O limite de ${lastSync.fullState.henOrder.length * 10} rodadas foi ultrapassado.`
+      : "A partida foi encerrada.";
+
+  return `
+    <section class="panel result-panel ${winnerClass}">
+      <div class="result-copy">
+        <p class="eyebrow">Fim da partida</p>
+        <h2 class="result-title">${escape_html(winnerLabel)}</h2>
+        <p class="result-text">${escape_html(reason)}</p>
+        <p class="helper">Voltando para o lobby da sala em instantes.</p>
+      </div>
+      <button class="btn btn-primary" data-action="back-to-lobby" type="button">Voltar agora</button>
     </section>
   `;
 }
