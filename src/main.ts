@@ -134,13 +134,6 @@ root.addEventListener("change", (event) => {
     render();
   }
 
-  if (target instanceof HTMLInputElement && target.dataset.action === "follow-toggle") {
-    uiState.followTurn = target.checked;
-    if (uiState.followTurn) {
-      uiState.watchName = lastSync?.publicState?.currentTurnName ?? lastSync?.selfName ?? null;
-    }
-    render();
-  }
 });
 
 root.addEventListener("click", async (event) => {
@@ -183,13 +176,15 @@ root.addEventListener("click", async (event) => {
       uiState.sideRailOpen = !uiState.sideRailOpen;
       render();
       break;
-    case "watch-screen":
-      uiState.watchName = actionEl.dataset.name ?? lastSync?.selfName ?? null;
-      uiState.followTurn = false;
+    case "toggle-follow-turn":
+      uiState.followTurn = !uiState.followTurn;
+      if (uiState.followTurn) {
+        uiState.watchName = lastSync?.publicState?.currentTurnName ?? lastSync?.selfName ?? null;
+      }
       render();
       break;
-    case "self-screen":
-      uiState.watchName = lastSync?.selfName ?? null;
+    case "watch-screen":
+      uiState.watchName = actionEl.dataset.name ?? lastSync?.selfName ?? null;
       uiState.followTurn = false;
       render();
       break;
@@ -650,7 +645,6 @@ function render(): void {
       </section>
       <aside class="right-column">
         ${render_roster_panel()}
-        ${render_controls_panel()}
         ${render_connection_panel()}
         ${render_action_panel()}
       </aside>
@@ -730,10 +724,9 @@ function render_turn_banner(): string {
           ${escape_html(current?.name ?? "Aguardando")}
         </strong>
       </div>
-      <label class="follow-toggle">
-        <input data-action="follow-toggle" type="checkbox" ${uiState.followTurn ? "checked" : ""} />
-        acompanhar a vez automaticamente
-      </label>
+      <button class="btn btn-secondary" data-action="toggle-follow-turn" type="button">
+        ${uiState.followTurn ? "Parar de acompanhar a vez" : "Acompanhar a vez"}
+      </button>
     </section>
   `;
 }
@@ -1063,25 +1056,6 @@ function render_roster_panel(): string {
   `;
 }
 
-function render_controls_panel(): string {
-  if (!lastSync) return "";
-  return `
-    <section class="panel stack">
-      <h2 class="section-title">Visoes</h2>
-      <p class="helper">A barra da esquerda mostra as telas limitadas de cada jogador ativo.</p>
-      <div class="button-row">
-        <button class="btn btn-secondary" data-action="toggle-rail" type="button">
-          ${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}
-        </button>
-        <button class="btn btn-secondary" data-action="self-screen" type="button">
-          Voltar para minha tela
-        </button>
-      </div>
-      <p class="helper">Pressione <code>Esc</code> para voltar imediatamente para a propria tela.</p>
-    </section>
-  `;
-}
-
 function render_connection_panel(): string {
   if (!lastSync) return "";
   return `
@@ -1157,7 +1131,16 @@ function render_action_panel(): string {
 
 function render_side_rail(): string {
   if (!lastSync?.publicState) {
-    return `<aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}"></aside>`;
+    return `
+      <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
+        <div class="side-rail-header">
+          <strong>Telas</strong>
+          <button class="ghost-btn rail-toggle" data-action="toggle-rail" type="button" aria-label="${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}">
+            ${uiState.sideRailOpen ? "←" : "→"}
+          </button>
+        </div>
+      </aside>
+    `;
   }
   const sync = lastSync;
   const publicState = sync.publicState!;
@@ -1171,7 +1154,7 @@ function render_side_rail(): string {
     <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
       <div class="side-rail-header">
         <strong>Telas</strong>
-        <button class="ghost-btn" data-action="toggle-rail" type="button">${uiState.sideRailOpen ? "←" : "→"}</button>
+        <button class="ghost-btn rail-toggle" data-action="toggle-rail" type="button" aria-label="${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}">${uiState.sideRailOpen ? "←" : "→"}</button>
       </div>
       ${orderedNames
         .map((name) => {
