@@ -166,15 +166,6 @@ button {
   font-size: 1rem;
 }
 
-.rail-toggle {
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
 .toast,
 .notice {
   margin: 0;
@@ -185,36 +176,31 @@ button {
 }
 
 .app-shell {
+  --rail-width: 92px;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 340px;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr) 340px;
   gap: 16px;
   padding: 16px;
+}
+
+.app-shell.rail-open {
+  --rail-width: 286px;
 }
 
 .side-rail {
   display: grid;
   align-content: start;
-  gap: 10px;
-  padding: 14px;
-  transition: width 160ms ease, padding 160ms ease;
+  gap: 12px;
+  padding: 10px;
+  min-width: 0;
+  transition: padding 160ms ease, transform 160ms ease;
 }
 
 .side-rail.collapsed {
-  width: 68px;
-  padding: 14px 8px;
-  overflow: hidden;
+  padding: 10px 8px;
 }
 
-.side-rail.collapsed .side-rail-header {
-  justify-content: center;
-}
-
-.side-rail.collapsed .side-rail-header strong {
-  display: none;
-}
-
-.side-rail-header,
 .header-card,
 .turn-banner,
 .panel-header,
@@ -222,6 +208,84 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+}
+
+.dock-toggle {
+  width: 100%;
+  min-height: 68px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: 22px;
+  border: 1px solid rgba(17, 35, 33, 0.08);
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 40px rgba(6, 14, 13, 0.12);
+  text-align: left;
+}
+
+.side-rail.collapsed .dock-toggle {
+  width: 64px;
+  min-height: 64px;
+  justify-content: center;
+  padding: 0;
+}
+
+.dock-toggle-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.dock-toggle-copy strong {
+  font-size: 0.92rem;
+}
+
+.dock-toggle-copy small {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.side-rail.collapsed .dock-toggle-copy {
+  display: none;
+}
+
+.screen-icon {
+  position: relative;
+  display: inline-block;
+  width: 24px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+.screen-icon::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 2px;
+  height: 5px;
+  background: currentColor;
+  transform: translateX(-50%);
+}
+
+.screen-icon::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  width: 12px;
+  height: 2px;
+  background: currentColor;
+  transform: translateX(-50%);
+}
+
+.side-rail-body {
+  display: grid;
   gap: 10px;
 }
 

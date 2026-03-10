@@ -636,7 +636,7 @@ function render(): void {
   }
 
   root.innerHTML = `
-    <main class="app-shell">
+    <main class="app-shell ${uiState.sideRailOpen ? "rail-open" : "rail-closed"}">
       ${render_side_rail()}
       <section class="main-column">
         ${render_turn_banner()}
@@ -1110,20 +1110,24 @@ function render_action_panel(): string {
 }
 
 function render_side_rail(): string {
+  const toggleLabel = uiState.sideRailOpen ? "Fechar telas" : "Abrir telas";
+
   if (!lastSync?.publicState) {
     return `
       <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
-        <div class="side-rail-header">
-          <strong>Telas</strong>
-          <button class="ghost-btn rail-toggle" data-action="toggle-rail" type="button" aria-label="${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}">
-            ${uiState.sideRailOpen ? "←" : "→"}
-          </button>
-        </div>
+        <button class="ghost-btn dock-toggle" data-action="toggle-rail" type="button" aria-label="${toggleLabel}" title="${toggleLabel}">
+          <span class="screen-icon" aria-hidden="true"></span>
+          <span class="dock-toggle-copy">
+            <strong>Telas</strong>
+            <small>Visoes</small>
+          </span>
+        </button>
       </aside>
     `;
   }
   const sync = lastSync;
   const publicState = sync.publicState!;
+  const activeName = uiState.watchName ?? sync.selfName;
 
   const orderedNames = [
     sync.selfName,
@@ -1132,34 +1136,46 @@ function render_side_rail(): string {
 
   return `
     <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
-      <div class="side-rail-header">
-        <strong>Telas</strong>
-        <button class="ghost-btn rail-toggle" data-action="toggle-rail" type="button" aria-label="${uiState.sideRailOpen ? "Fechar telas" : "Abrir telas"}">${uiState.sideRailOpen ? "←" : "→"}</button>
-      </div>
-      ${orderedNames
-        .map((name) => {
-          const view = publicState.screens[name];
-          const player = sync.players.find((item) => item.name === name);
-          return `
-            <button
-              class="screen-card ${uiState.watchName === name ? "active" : ""}"
-              data-action="watch-screen"
-              data-name="${escape_html(name)}"
-              type="button"
-            >
-              <div class="screen-card-header">
-                <span class="legend-color" style="background:${player?.color ?? "#000"}"></span>
-                <strong>${escape_html(name)}</strong>
-              </div>
-              <div class="screen-card-body">
-                <span>${escape_html(role_label(player?.role ?? "player"))}</span>
-                <span>${escape_html(view?.roomType ? room_type_label(view.roomType) : "sem sala")}</span>
-                <span>${escape_html(view ? `${view.exits.length} saidas` : "-")}</span>
-              </div>
-            </button>
-          `;
-        })
-        .join("")}
+      <button class="ghost-btn dock-toggle" data-action="toggle-rail" type="button" aria-label="${toggleLabel}" title="${toggleLabel}">
+        <span class="screen-icon" aria-hidden="true"></span>
+        <span class="dock-toggle-copy">
+          <strong>Telas</strong>
+          <small>${escape_html(activeName)}</small>
+        </span>
+      </button>
+      ${
+        uiState.sideRailOpen
+          ? `
+            <div class="side-rail-body">
+              ${orderedNames
+                .map((name) => {
+                  const view = publicState.screens[name];
+                  const player = sync.players.find((item) => item.name === name);
+                  const isActive = activeName === name;
+                  return `
+                    <button
+                      class="screen-card ${isActive ? "active" : ""}"
+                      data-action="watch-screen"
+                      data-name="${escape_html(name)}"
+                      type="button"
+                    >
+                      <div class="screen-card-header">
+                        <span class="legend-color" style="background:${player?.color ?? "#000"}"></span>
+                        <strong>${escape_html(name)}</strong>
+                      </div>
+                      <div class="screen-card-body">
+                        <span>${escape_html(role_label(player?.role ?? "player"))}</span>
+                        <span>${escape_html(view?.roomType ? room_type_label(view.roomType) : "sem sala")}</span>
+                        <span>${escape_html(view ? `${view.exits.length} saidas` : "-")}</span>
+                      </div>
+                    </button>
+                  `;
+                })
+                .join("")}
+            </div>
+          `
+          : ""
+      }
     </aside>
   `;
 }
