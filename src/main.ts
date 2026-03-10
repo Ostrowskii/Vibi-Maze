@@ -1,36 +1,26 @@
 import "./style.css";
 import { OFFICIAL_SERVER_URL, VibiNet } from "vibinet";
 import {
-  add_room,
-  add_self_loop,
   apply_kill_choice,
+  apply_map_edit,
   apply_move,
   apply_transport_post,
-  build_public_state,
-  choose_fox,
-  choose_random_fox,
   clone_state,
-  create_default_maze,
-  create_empty_state,
   create_transport_state,
-  cycle_room_type,
   derive_room_sync,
   encode_transport_post,
-  move_room,
   normalize_name,
   normalize_room,
-  pick_random_saved_maze,
-  remove_room,
-  reset_to_lobby,
+  pick_random_fox_name,
+  pick_random_saved_maze_seed,
   saved_maze_count,
-  start_game,
-  sync_state_players,
   tick_transport_state,
-  toggle_corridor,
 } from "./game";
 import type {
+  FeedEntry,
   FullGameState,
   LimitedPlayerView,
+  MapEditAction,
   NetPost,
   Presence,
   RoomSync,
@@ -40,13 +30,14 @@ import type {
 type UiState = {
   roomInput: string;
   nameInput: string;
+  chatInput: string;
   followTurn: boolean;
   watchName: string | null;
-  sideRailOpen: boolean;
   revealFullMap: boolean;
   selectedRoomId: string | null;
   connectSourceRoomId: string | null;
   dragRoomId: string | null;
+  editorOpen: boolean;
   toast: string;
 };
 
@@ -63,13 +54,14 @@ const query = new URLSearchParams(window.location.search);
 const uiState: UiState = {
   roomInput: query.get("room") ?? window.localStorage.getItem(ROOM_KEY) ?? "galinheiro-1",
   nameInput: query.get("name") ?? window.localStorage.getItem(NAME_KEY) ?? "",
+  chatInput: "",
   followTurn: true,
   watchName: null,
-  sideRailOpen: true,
   revealFullMap: false,
   selectedRoomId: null,
   connectSourceRoomId: null,
   dragRoomId: null,
+  editorOpen: false,
   toast: "",
 };
 
@@ -83,13 +75,11 @@ let heartbeatLoopId: number | null = null;
 let sharedState: TransportState | null = null;
 let lastSync: RoomSync | null = null;
 let lastSyncSignature = "";
-let masterState: FullGameState | null = null;
-let lastPublishedSignature = "";
-let lastServerFullSignature = "";
+let editorState: FullGameState | null = null;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
-  throw new Error("Elemento #app não encontrado.");
+  throw new Error("Elemento #app nao encontrado.");
 }
 const root: HTMLDivElement = app;
 
@@ -102,12 +92,18 @@ root.addEventListener("submit", (event) => {
   if (target.dataset.form === "join") {
     event.preventDefault();
     join_room();
+    return;
+  }
+
+  if (target.dataset.form === "chat") {
+    event.preventDefault();
+    send_chat_message();
   }
 });
 
 root.addEventListener("input", (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLInputElement)) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
     return;
   }
 
@@ -117,23 +113,9 @@ root.addEventListener("input", (event) => {
   if (target.name === "name") {
     uiState.nameInput = target.value;
   }
-});
-
-root.addEventListener("change", (event) => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) {
-    return;
+  if (target.name === "chat") {
+    uiState.chatInput = target.value;
   }
-
-  if (target instanceof HTMLSelectElement && target.dataset.action === "fox-select") {
-    if (!masterState) {
-      return;
-    }
-    masterState = choose_fox(masterState, target.value);
-    publish_master_state();
-    render();
-  }
-
 });
 
 root.addEventListener("click", async (event) => {
@@ -157,24 +139,16 @@ root.addEventListener("click", async (event) => {
       if (!lastSync) return;
       post_transport(
         is_self_master()
-          ? {
-              $: "unclaim_master",
-              name: lastSync.selfName,
-              sessionId: activeSessionId,
-            }
-          : {
-              $: "claim_master",
-              name: lastSync.selfName,
-              sessionId: activeSessionId,
-            },
+          ? { $: "unclaim_master", name: lastSync.selfName, sessionId: activeSessionId }
+          : { $: "claim_master", name: lastSync.selfName, sessionId: activeSessionId },
       );
+      break;
+    case "toggle-ready":
+      if (!lastSync) return;
+      post_transport({ $: "toggle_ready", name: lastSync.selfName, sessionId: activeSessionId });
       break;
     case "copy-link":
       await copy_room_link();
-      break;
-    case "toggle-rail":
-      uiState.sideRailOpen = !uiState.sideRailOpen;
-      render();
       break;
     case "toggle-follow-turn":
       uiState.followTurn = !uiState.followTurn;
@@ -192,100 +166,69 @@ root.addEventListener("click", async (event) => {
       uiState.revealFullMap = true;
       render();
       break;
-    case "vote-swap-master":
-    case "become-master":
-    case "abandon-match":
-      flash("Troca de mestre nao existe nesta branch.");
+    case "random-map":
+      if (!lastSync) return;
+      post_transport({
+        $: "set_random_map",
+        name: lastSync.selfName,
+        sessionId: activeSessionId,
+        seed: pick_random_saved_maze_seed(),
+      });
+      flash(`Mapa aleatorio aplicado. Biblioteca: ${saved_maze_count()} mapas.`);
+      break;
+    case "shuffle-fox":
+      if (!lastSync) return;
+      post_transport({
+        $: "set_random_fox",
+        name: lastSync.selfName,
+        sessionId: activeSessionId,
+        foxName: pick_random_fox_name(lastSync.players, lastSync.masterName),
+      });
+      break;
+    case "toggle-self-fox":
+      if (!lastSync) return;
+      post_transport({ $: "toggle_self_fox", name: lastSync.selfName, sessionId: activeSessionId });
+      break;
+    case "start-game":
+      if (!lastSync) return;
+      post_transport({ $: "start_game", name: lastSync.selfName, sessionId: activeSessionId, seed: random_seed() });
+      break;
+    case "back-to-lobby":
+      if (!lastSync) return;
+      post_transport({ $: "return_to_lobby", name: lastSync.selfName, sessionId: activeSessionId });
+      break;
+    case "open-editor":
+      open_editor();
+      break;
+    case "close-modal":
+      close_editor();
       break;
     case "editor-add-room":
-      if (!masterState) return;
-      masterState = add_room(masterState);
-      publish_master_state();
-      render();
+      handle_editor_action({ type: "add_room" });
       break;
     case "editor-default":
-      if (!masterState) return;
-      {
-        const maze = create_default_maze();
-        masterState = {
-          ...masterState,
-          rooms: maze.rooms,
-          corridors: maze.corridors,
-        };
-      }
-      publish_master_state();
-      render();
-      break;
-    case "random-map":
-      if (!masterState) return;
-      {
-        const maze = pick_random_saved_maze();
-        masterState = {
-          ...masterState,
-          rooms: maze.rooms,
-          corridors: maze.corridors,
-        };
-      }
-      flash(`Mapa aleatorio aplicado. Biblioteca: ${saved_maze_count()} mapas.`);
-      publish_master_state();
-      render();
+      handle_editor_action({ type: "set_default_map" });
       break;
     case "editor-connect":
       uiState.connectSourceRoomId = uiState.selectedRoomId;
       render();
       break;
     case "editor-cycle-type":
-      if (!masterState || !uiState.selectedRoomId) return;
-      masterState = cycle_room_type(masterState, uiState.selectedRoomId);
-      publish_master_state();
-      render();
+      if (!uiState.selectedRoomId) return;
+      handle_editor_action({ type: "cycle_room_type", roomId: uiState.selectedRoomId });
       break;
     case "editor-remove-room":
-      if (!masterState || !uiState.selectedRoomId) return;
-      masterState = remove_room(masterState, uiState.selectedRoomId);
-      uiState.selectedRoomId = null;
-      uiState.connectSourceRoomId = null;
-      publish_master_state();
-      render();
+      if (!uiState.selectedRoomId) return;
+      {
+        const roomId = uiState.selectedRoomId;
+        uiState.selectedRoomId = null;
+        uiState.connectSourceRoomId = null;
+        handle_editor_action({ type: "remove_room", roomId });
+      }
       break;
     case "editor-loop":
-      if (!masterState || !uiState.selectedRoomId) return;
-      masterState = add_self_loop(masterState, uiState.selectedRoomId);
-      publish_master_state();
-      render();
-      break;
-    case "shuffle-fox":
-      if (!masterState) return;
-      masterState = choose_random_fox(masterState);
-      publish_master_state();
-      render();
-      break;
-    case "toggle-self-fox":
-      if (!masterState || !lastSync) return;
-      masterState = choose_fox(masterState, self_is_fox_candidate() ? "" : lastSync.selfName);
-      publish_master_state();
-      render();
-      break;
-    case "start-game":
-      if (!masterState || !lastSync) return;
-      {
-        const next = start_game(masterState, lastSync.players);
-        if (!next) {
-          flash("Precisa de pelo menos 2 jogadores conectados para iniciar.");
-          return;
-        }
-        masterState = next;
-        uiState.revealFullMap = false;
-      }
-      publish_master_state();
-      render();
-      break;
-    case "back-to-lobby":
-      if (!masterState || !lastSync) return;
-      masterState = reset_to_lobby(masterState, lastSync.players);
-      uiState.revealFullMap = false;
-      publish_master_state();
-      render();
+      if (!uiState.selectedRoomId) return;
+      handle_editor_action({ type: "toggle_loop", roomId: uiState.selectedRoomId });
       break;
     case "submit-pass":
       handle_move(null);
@@ -302,10 +245,25 @@ root.addEventListener("click", async (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && lastSync) {
-    uiState.watchName = lastSync.selfName;
-    uiState.followTurn = false;
-    render();
+  const target = event.target;
+  const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+
+  if (event.key === "Escape") {
+    if (uiState.editorOpen) {
+      close_editor();
+      return;
+    }
+    if (lastSync) {
+      uiState.watchName = lastSync.selfName;
+      uiState.followTurn = false;
+      render();
+    }
+    return;
+  }
+
+  if (!typing && event.key.toLowerCase() === "m" && lastSync?.phase === "lobby" && is_self_master()) {
+    event.preventDefault();
+    open_editor();
   }
 });
 
@@ -332,9 +290,13 @@ function join_room(): void {
   lastSync = null;
   lastSyncSignature = "";
   sharedState = null;
-  masterState = null;
-  lastPublishedSignature = "";
-  lastServerFullSignature = "";
+  editorState = null;
+  uiState.watchName = null;
+  uiState.revealFullMap = false;
+  uiState.editorOpen = false;
+  uiState.selectedRoomId = null;
+  uiState.connectSourceRoomId = null;
+  uiState.dragRoomId = null;
 
   socketState = "connecting";
   const options: {
@@ -363,11 +325,7 @@ function join_room(): void {
   game = new VibiNet.game(options);
   game.on_sync(() => {
     socketState = "connected";
-    post_transport({
-      $: "join_room",
-      name,
-      sessionId: activeSessionId,
-    });
+    post_transport({ $: "join_room", name, sessionId: activeSessionId });
     start_transport_loops();
     sync_from_transport();
     render();
@@ -382,21 +340,7 @@ function sync_from_transport(): void {
   }
 
   sharedState = game.compute_render_state();
-  const nextSync = derive_room_sync(activeRoom, activeName, sharedState);
-
-  if (nextSync.fullState) {
-    const fullSignature = JSON.stringify(nextSync.fullState);
-    if (fullSignature !== lastServerFullSignature && !uiState.dragRoomId) {
-      lastServerFullSignature = fullSignature;
-      if (!masterState || nextSync.controllerName !== nextSync.selfName) {
-        masterState = clone_state(nextSync.fullState);
-      }
-    }
-  } else {
-    lastServerFullSignature = "";
-  }
-
-  lastSync = nextSync;
+  lastSync = derive_room_sync(activeRoom, activeName, sharedState);
   on_sync();
 
   const signature = JSON.stringify(lastSync);
@@ -411,156 +355,31 @@ function on_sync(): void {
     return;
   }
 
-  if (can_publish_state()) {
-    const base = masterState ?? lastSync.fullState ?? create_empty_state(lastSync.room, lastSync.players, lastSync.masterName);
-    const withRoster = sync_state_players(base, lastSync.players, lastSync.masterName);
-    masterState = withRoster;
-    if (!flush_master_actions()) {
-      publish_master_state();
-    }
-  }
-
   const self = self_presence();
   if (self && self.seat === "spectator" && lastSync.phase !== "lobby") {
     uiState.revealFullMap = true;
   }
+  if (lastSync.phase === "lobby") {
+    uiState.revealFullMap = false;
+  }
 
-  if (uiState.followTurn) {
-    uiState.watchName = lastSync.publicState?.currentTurnName ?? lastSync.selfName;
-  } else if (!uiState.watchName) {
+  if (lastSync.phase !== "lobby") {
+    if (uiState.followTurn) {
+      uiState.watchName = lastSync.publicState?.currentTurnName ?? lastSync.selfName;
+    } else if (!uiState.watchName) {
+      uiState.watchName = lastSync.selfName;
+    }
+  } else {
     uiState.watchName = lastSync.selfName;
   }
-}
 
-function flush_master_actions(): boolean {
-  if (!lastSync || !masterState) {
-    return false;
+  if (uiState.editorOpen && lastSync.phase === "lobby" && !uiState.dragRoomId) {
+    editorState = clone_state(lastSync.fullState);
   }
-
-  const pendingActions = lastSync.pendingActions;
-  if (pendingActions.length === 0) {
-    return false;
+  if (lastSync.phase !== "lobby") {
+    uiState.editorOpen = false;
+    editorState = null;
   }
-
-  let nextState = masterState;
-  const consumedActionIds: string[] = [];
-
-  for (const action of pendingActions) {
-    nextState =
-      action.type === "move"
-        ? apply_move(nextState, action.actorName, action.corridorId)
-        : apply_kill_choice(nextState, action.actorName, action.targetName);
-    consumedActionIds.push(action.id);
-  }
-
-  masterState = nextState;
-  publish_master_state(consumedActionIds);
-  render();
-  return true;
-}
-
-function publish_master_state(consumedActionIds: string[] = []): void {
-  if (!lastSync || !masterState || !can_publish_state()) {
-    return;
-  }
-  const publicState = build_public_state(masterState, lastSync.players);
-  const fullState = clone_state(masterState);
-  const signature = JSON.stringify({ fullState, publicState, consumedActionIds });
-  if (signature === lastPublishedSignature) {
-    return;
-  }
-  lastPublishedSignature = signature;
-  post_transport({
-    $: "publish_state",
-    name: lastSync.selfName,
-    sessionId: activeSessionId,
-    fullState,
-    publicState,
-    consumedActionIds,
-  });
-}
-
-function handle_move(corridorId: string | null): void {
-  if (!lastSync) {
-    return;
-  }
-  const actorName = action_actor_name();
-  if (!actorName) {
-    return;
-  }
-
-  if (can_publish_state()) {
-    if (!masterState) return;
-    masterState = apply_move(masterState, actorName, corridorId);
-    publish_master_state();
-    render();
-    return;
-  }
-
-  post_transport({
-    $: "submit_move",
-    name: lastSync.selfName,
-    sessionId: activeSessionId,
-    actorName,
-    requestId: new_request_id(),
-    corridorId,
-  });
-}
-
-function handle_kill(targetName: string): void {
-  if (!lastSync || !targetName) {
-    return;
-  }
-  const actorName = action_actor_name();
-  if (!actorName) {
-    return;
-  }
-
-  if (can_publish_state()) {
-    if (!masterState) return;
-    masterState = apply_kill_choice(masterState, actorName, targetName);
-    publish_master_state();
-    render();
-    return;
-  }
-
-  post_transport({
-    $: "select_kill_target",
-    name: lastSync.selfName,
-    sessionId: activeSessionId,
-    actorName,
-    requestId: new_request_id(),
-    targetName,
-  });
-}
-
-function action_actor_name(): string | null {
-  if (!lastSync?.publicState?.currentTurnName) {
-    return null;
-  }
-  if (can_self_act()) {
-    return lastSync.selfName;
-  }
-  if (can_master_override()) {
-    return lastSync.publicState.currentTurnName;
-  }
-  return null;
-}
-
-function can_self_act(): boolean {
-  if (!lastSync?.publicState?.currentTurnName) {
-    return false;
-  }
-  return lastSync.publicState.currentTurnName === lastSync.selfName;
-}
-
-function can_master_override(): boolean {
-  if (!can_publish_state() || !lastSync?.publicState?.currentTurnName) {
-    return false;
-  }
-  const sync = lastSync;
-  const actor = sync.players.find((player) => player.name === sync.publicState?.currentTurnName);
-  return actor?.connected === false;
 }
 
 function post_transport(post: NetPost): void {
@@ -625,8 +444,8 @@ function refresh_session_id(): string {
   return next;
 }
 
-function new_request_id(): string {
-  return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+function random_seed(): number {
+  return Math.floor(Math.random() * 0xffffffff);
 }
 
 function render(): void {
@@ -636,16 +455,15 @@ function render(): void {
   }
 
   root.innerHTML = `
-    <main class="app-shell ${uiState.sideRailOpen ? "rail-open" : "rail-closed"}">
-      ${render_side_rail()}
+    <main class="app-shell phase-${lastSync.phase}">
+      ${render_left_sidebar()}
       <section class="main-column">
         ${render_turn_banner()}
-        ${render_phase_content()}
+        ${lastSync.phase === "lobby" ? render_lobby_content() : render_game_content()}
       </section>
       <aside class="right-column">
-        ${render_roster_panel()}
-        ${render_connection_panel()}
         ${render_action_panel()}
+        ${render_feed_panel()}
       </aside>
       ${render_modal()}
     </main>
@@ -661,7 +479,7 @@ function render_join_screen(): string {
         <p class="eyebrow">Room + Nome</p>
         <h1 class="title">Vibi-Maze</h1>
         <p class="subtitle">
-          Entre em uma sala, escolha um mestre e monte o labirinto antes da raposa sair caçando.
+          Entre numa sala, escolha seus papeis no lobby e prepare o labirinto antes da raposa sair cacando.
         </p>
         <form data-form="join" class="join-form">
           <label class="field">
@@ -676,9 +494,6 @@ function render_join_screen(): string {
             ${socketState === "connecting" ? "Conectando..." : "Entrar"}
           </button>
         </form>
-        <p class="helper">
-          Servidor VibiNet: <code>${escape_html(resolve_ws_url())}</code>
-        </p>
         ${uiState.toast ? `<p class="toast">${escape_html(uiState.toast)}</p>` : ""}
       </section>
     </main>
@@ -688,6 +503,9 @@ function render_join_screen(): string {
 function render_turn_banner(): string {
   if (!lastSync) return "";
   const sync = lastSync;
+  const readyText = sync.lobbyState
+    ? `${sync.lobbyState.readyCount}/${sync.lobbyState.connectedParticipantCount} ready`
+    : `Rodada ${sync.publicState?.round ?? 0}`;
   const current = sync.publicState?.currentTurnName
     ? sync.players.find((player) => player.name === sync.publicState?.currentTurnName)
     : null;
@@ -699,156 +517,171 @@ function render_turn_banner(): string {
         <strong>${escape_html(phase_label(sync.phase))}</strong>
       </div>
       <div>
-        <p class="turn-label">VEZ</p>
+        <p class="turn-label">${sync.phase === "lobby" ? "PRONTOS" : "VEZ"}</p>
         <strong style="${current ? `color:${current.color}` : ""}">
-          ${escape_html(current?.name ?? "Aguardando")}
+          ${escape_html(sync.phase === "lobby" ? readyText : current?.name ?? "Aguardando")}
         </strong>
       </div>
     </section>
   `;
 }
 
-function render_phase_content(): string {
+function render_left_sidebar(): string {
   if (!lastSync) return "";
-  if (lastSync.phase === "lobby") {
-    return `
-      <section class="phase-grid">
-        <div class="panel spacious">
-          ${can_edit_lobby_map() ? render_master_editor() : render_waiting_lobby()}
+  const self = self_presence();
+  const activeName = uiState.watchName ?? lastSync.selfName;
+
+  return `
+    <aside class="left-sidebar">
+      <section class="panel compact-stack">
+        <div class="mini-metric">
+          <span>Ping</span>
+          <strong>${Math.round(game?.ping?.() ?? 0)} ms</strong>
         </div>
-        <div class="panel">
-          ${render_lobby_controls()}
-        </div>
+        <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link</button>
+        ${
+          lastSync.phase === "lobby"
+            ? `
+              <button
+                class="btn ${self?.ready ? "btn-danger" : "btn-primary"} btn-block"
+                data-action="toggle-ready"
+                type="button"
+                ${self?.seat === "participant" ? "" : "disabled"}
+              >
+                ${self?.ready ? "Remover ready" : "Ready"}
+              </button>
+            `
+            : `
+              <div class="mini-metric">
+                <span>Visao</span>
+                <strong>${escape_html(activeName)}</strong>
+              </div>
+            `
+        }
       </section>
-    `;
+      <section class="panel stack">
+        <div class="panel-header">
+          <h2 class="section-title">Pessoas na sala</h2>
+          <span class="tag">${lastSync.players.length}</span>
+        </div>
+        <ul class="roster">
+          ${lastSync.players
+            .map((player) => render_roster_item(player, activeName))
+            .join("")}
+        </ul>
+      </section>
+    </aside>
+  `;
+}
+
+function render_roster_item(player: Presence, activeName: string): string {
+  const isSelf = player.name === lastSync?.selfName;
+  const isActive = player.name === activeName;
+  const canWatch = Boolean(lastSync?.phase !== "lobby" && lastSync?.publicState?.screens[player.name]);
+  const body = `
+    <span class="legend-color" style="background:${player.color}"></span>
+    <div class="roster-copy">
+      <strong>${escape_html(player.name)}</strong>
+      <div class="helper">
+        ${escape_html(role_label(player.role))} • ${player.connected ? "online" : "offline"}
+      </div>
+    </div>
+    <span class="tag">${player.ready && lastSync?.phase === "lobby" ? "ready" : player.alive ? "vivo" : player.seat === "spectator" ? "spec" : "fora"}</span>
+  `;
+
+  if (!canWatch) {
+    return `<li class="roster-item ${isSelf ? "is-self" : ""} ${isActive ? "is-active" : ""}">${body}</li>`;
   }
 
-  const showFull = should_show_full_map();
   return `
-    <section class="phase-grid running">
-      <div class="panel spacious">
-        ${showFull ? render_full_map_panel() : render_room_view_panel()}
-      </div>
-      <div class="panel">
-        ${render_runtime_info()}
-      </div>
-    </section>
+    <li>
+      <button
+        class="roster-item roster-button ${isSelf ? "is-self" : ""} ${isActive ? "is-active" : ""}"
+        data-action="watch-screen"
+        data-name="${escape_html(player.name)}"
+        type="button"
+      >
+        ${body}
+      </button>
+    </li>
   `;
 }
 
-function render_waiting_lobby(): string {
-  const canQuickStart = can_self_manage_lobby() && !is_self_master();
-  return `
-    <div class="empty-panel">
-      <h2>${canQuickStart ? "Pronto para partida rapida" : "Aguardando mestre"}</h2>
-      <p>
-        ${
-          canQuickStart
-            ? "Ninguem virou mestre. Como primeiro jogador conectado, voce pode sortear um mapa salvo e iniciar com 2 ou mais pessoas."
-            : "Quando alguem assumir o papel de mestre, essa pessoa vai editar o labirinto e escolher quem sera a raposa."
-        }
-      </p>
-    </div>
-  `;
-}
-
-function render_lobby_controls(): string {
+function render_lobby_content(): string {
   if (!lastSync) return "";
-  const canManageLobby = can_self_manage_lobby();
-
   return `
-    <section class="stack">
-      <h2 class="section-title">Sala</h2>
-      <p class="metric"><strong>Jogadores ativos:</strong> ${lastSync.players.filter((player) => player.seat === "participant").length}</p>
-      <p class="metric"><strong>Mestre:</strong> ${escape_html(lastSync.masterName ?? "ninguem")}</p>
-      <p class="metric"><strong>Controller:</strong> ${escape_html(lastSync.controllerName ?? "aguardando jogadores")}</p>
-      ${
-        canManageLobby
-          ? `
-            ${
-              is_self_master()
-                ? '<p class="helper">Como mestre, voce tambem pode editar o labirinto manualmente.</p>'
-                : '<p class="helper">Sem mestre explicito, o primeiro jogador conectado controla o lobby e o sorteio do mapa.</p>'
-            }
-          `
-          : `
-            <p class="helper">Voce continua esperando no lobby enquanto o controller atual prepara a partida.</p>
-          `
-      }
+    <section class="lobby-layout">
+      <section class="panel stack spacious">
+        <div class="panel-header">
+          <div>
+            <h2 class="section-title">Lobby da sala</h2>
+            <p class="helper">
+              ${escape_html(lastSync.room)} • ${lastSync.lobbyState?.readyCount ?? 0}/${lastSync.lobbyState?.connectedParticipantCount ?? 0} ready
+            </p>
+          </div>
+          <span class="tag">${escape_html(lastSync.masterName ?? "sem mestre")}</span>
+        </div>
+        <div class="lobby-summary-grid">
+          <div class="metric-card">
+            <span>Mestre</span>
+            <strong>${escape_html(lastSync.masterName ?? "ninguem")}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Raposa</span>
+            <strong>${escape_html(lastSync.fullState.foxName ?? "nao escolhida")}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Participantes</span>
+            <strong>${lastSync.lobbyState?.connectedParticipantCount ?? 0}</strong>
+          </div>
+          <div class="metric-card">
+            <span>Inicio</span>
+            <strong>${lastSync.lobbyState?.allConnectedReady ? "automatico" : "aguardando"}</strong>
+          </div>
+        </div>
+        <div class="panel-note">
+          ${
+            is_self_master()
+              ? "Voce e o mestre. Use o botao ou aperte M para abrir o editor do mapa."
+              : "O lobby nao mostra telas para assistir. Aqui voce organiza papeis, ready e conversa antes da partida."
+          }
+        </div>
+        <svg class="editor-map readonly" viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
+          ${render_maze_svg(lastSync.fullState, false)}
+        </svg>
+      </section>
     </section>
   `;
 }
 
-function render_master_editor(): string {
-  if (!masterState || !lastSync) return "";
-  const selectedRoom = uiState.selectedRoomId ? masterState.rooms[uiState.selectedRoomId] : null;
-  const editorTitle = is_self_master() ? "Editor do mestre" : "Editor do controller";
-  const editorHelp = is_self_master()
-    ? "Arraste salas, conecte pares e monte o labirinto antes do inicio."
-    : "Sem mestre explicito, o controller atual pode editar o labirinto antes do inicio.";
+function render_game_content(): string {
   return `
-    <section class="editor-shell">
-      <div class="panel-header">
-        <div>
-          <h2 class="section-title">${editorTitle}</h2>
-          <p class="helper">${editorHelp}</p>
-        </div>
-        <div class="button-row tight">
-          <button class="btn btn-secondary" data-action="editor-add-room" type="button">Nova sala</button>
-          <button class="btn btn-secondary" data-action="editor-default" type="button">Mapa 3x3</button>
-          <button class="btn btn-secondary" data-action="random-map" type="button">Mapa aleatorio</button>
-        </div>
-      </div>
-      <svg class="editor-map" data-editor-svg viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
-        ${render_maze_svg(masterState, true)}
-      </svg>
-      <div class="editor-toolbar">
-        <div class="metric-block">
-          <strong>Sala selecionada</strong>
-          <span>${escape_html(selectedRoom?.id ?? "nenhuma")}</span>
-        </div>
-        <div class="metric-block">
-          <strong>Tipo</strong>
-          <span>${escape_html(selectedRoom?.type ?? "-")}</span>
-        </div>
-        <div class="button-row">
-          <button class="btn btn-secondary" data-action="editor-connect" type="button" ${selectedRoom ? "" : "disabled"}>
-            ${uiState.connectSourceRoomId ? "Clique em outra sala" : "Conectar"}
-          </button>
-          <button class="btn btn-secondary" data-action="editor-cycle-type" type="button" ${selectedRoom ? "" : "disabled"}>
-            Alternar tipo
-          </button>
-          <button class="btn btn-secondary" data-action="editor-loop" type="button" ${selectedRoom ? "" : "disabled"}>
-            Loop
-          </button>
-          <button class="btn btn-danger" data-action="editor-remove-room" type="button" ${selectedRoom ? "" : "disabled"}>
-            Remover
-          </button>
-        </div>
-      </div>
+    <section class="game-layout">
+      <section class="panel spacious">
+        ${should_show_full_map() ? render_full_map_panel() : render_room_view_panel()}
+      </section>
     </section>
   `;
 }
 
 function render_full_map_panel(): string {
-  if (!masterState) {
+  if (!lastSync) {
     return '<div class="empty-panel"><h2>Sem mapa completo</h2></div>';
   }
 
-  const canReturnToLobby = is_self_master();
   return `
     <section class="stack">
       <div class="panel-header">
         <div>
-          <h2 class="section-title">${is_self_master() ? "Mapa mestre" : "Visao completa"}</h2>
+          <h2 class="section-title">${is_self_master() ? "Mapa completo" : "Visao completa"}</h2>
           <p class="helper">
-            ${is_self_master() ? "Voce enxerga tudo o tempo todo." : "Agora voce pode assistir a partida inteira."}
+            ${is_self_master() ? "Como mestre, voce enxerga o labirinto inteiro." : "Voce liberou o mapa completo para assistir."}
           </p>
         </div>
-        ${canReturnToLobby ? '<button class="btn btn-secondary" data-action="back-to-lobby" type="button">Voltar ao lobby</button>' : ""}
+        ${lastSync.phase === "game_over" ? '<button class="btn btn-secondary" data-action="back-to-lobby" type="button">Voltar ao lobby</button>' : ""}
       </div>
       <svg class="editor-map readonly" viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
-        ${render_maze_svg(masterState, false)}
+        ${render_maze_svg(lastSync.fullState, false)}
       </svg>
       ${render_full_map_legend()}
     </section>
@@ -879,7 +712,7 @@ function render_room_view_panel(): string {
 
   const watchedName = uiState.watchName ?? lastSync.selfName;
   const view = lastSync.publicState.screens[watchedName] ?? null;
-  const selfFull = lastSync.fullState?.players[lastSync.selfName];
+  const selfFull = lastSync.fullState.players[lastSync.selfName];
   const showSpectatorButton = Boolean(selfFull && !selfFull.alive && selfFull.seat === "participant" && !uiState.revealFullMap);
 
   if (!view) {
@@ -887,6 +720,7 @@ function render_room_view_panel(): string {
       <div class="empty-panel">
         <h2>Sem tela para acompanhar</h2>
         ${showSpectatorButton ? '<button class="btn btn-primary" data-action="reveal-full-map" type="button">Ficar de espectador</button>' : ""}
+        ${lastSync.phase === "game_over" ? '<button class="btn btn-secondary" data-action="back-to-lobby" type="button">Voltar ao lobby</button>' : ""}
       </div>
     `;
   }
@@ -905,7 +739,10 @@ function render_room_view_panel(): string {
             ${escape_html(view.roomType ? `Sala ${room_type_label(view.roomType)}` : "Sem posicao visivel")}
           </p>
         </div>
-        ${showSpectatorButton ? '<button class="btn btn-secondary" data-action="reveal-full-map" type="button">Ficar de espectador</button>' : ""}
+        <div class="button-row tight">
+          ${showSpectatorButton ? '<button class="btn btn-secondary" data-action="reveal-full-map" type="button">Ficar de espectador</button>' : ""}
+          ${lastSync.phase === "game_over" ? '<button class="btn btn-secondary" data-action="back-to-lobby" type="button">Voltar ao lobby</button>' : ""}
+        </div>
       </div>
       ${render_scene(view, canMove)}
       ${
@@ -945,7 +782,7 @@ function render_scene(view: LimitedPlayerView, canMove: boolean): string {
       <div class="scene-box">
         <div class="room-label">${escape_html(view.roomType ? room_type_label(view.roomType) : "Sem sala")}</div>
         ${exits
-          .map((exit, index) => `
+          .map((exit) => `
             <button
               class="exit-btn"
               style="left:${exit.left}%;top:${exit.top}%;"
@@ -973,219 +810,171 @@ function render_scene(view: LimitedPlayerView, canMove: boolean): string {
   `;
 }
 
-function render_runtime_info(): string {
-  if (!lastSync) return "";
-  const watchedName = uiState.watchName ?? lastSync.selfName;
-  const current = lastSync.publicState?.currentTurnName ?? "Aguardando";
-  const self = self_presence();
-  const canOverride = can_master_override();
-
-  return `
-    <section class="stack">
-      <h2 class="section-title">Partida</h2>
-      <p class="metric"><strong>Rodada:</strong> ${lastSync.publicState?.round ?? 0}</p>
-      <p class="metric"><strong>Na tela:</strong> ${escape_html(watchedName)}</p>
-      <p class="metric"><strong>Turno atual:</strong> ${escape_html(current)}</p>
-      <p class="metric"><strong>Status:</strong> ${escape_html(phase_label(lastSync.phase))}</p>
-      ${
-        canOverride
-          ? `<p class="notice">Jogador atual caiu. O mestre pode agir por <strong>${escape_html(current)}</strong>.</p>`
-          : ""
-      }
-      ${
-        self && self.role === "spectator"
-          ? `<p class="helper">Voce entrou depois do inicio e esta vendo a partida como espectador total.</p>`
-          : ""
-      }
-      ${
-        uiState.toast
-          ? `<p class="toast">${escape_html(uiState.toast)}</p>`
-          : ""
-      }
-    </section>
-  `;
-}
-
-function render_roster_panel(): string {
-  if (!lastSync) return "";
-  const sync = lastSync;
-  return `
-    <section class="panel stack">
-      <h2 class="section-title">Jogadores</h2>
-      <ul class="roster">
-        ${sync.players
-          .map((player) => {
-            const isSelf = player.name === sync.selfName;
-            return `
-              <li class="roster-item ${isSelf ? "is-self" : ""}">
-                <span class="legend-color" style="background:${player.color}"></span>
-                <div>
-                  <strong>${escape_html(player.name)}</strong>
-                  <div class="helper">${escape_html(role_label(player.role))} • ${player.connected ? "online" : "offline"}</div>
-                </div>
-                <span class="tag">${player.alive ? "vivo" : player.seat === "spectator" ? "spec" : "fora"}</span>
-              </li>
-            `;
-          })
-          .join("")}
-      </ul>
-    </section>
-  `;
-}
-
-function render_connection_panel(): string {
-  if (!lastSync) return "";
-  return `
-    <section class="panel stack">
-      <h2 class="section-title">Conexao</h2>
-      <p class="metric"><strong>Estado:</strong> ${escape_html(socketState)}</p>
-      <p class="metric"><strong>Ping:</strong> ${Math.round(game?.ping?.() ?? 0)} ms</p>
-      ${lastSync.message ? `<p class="notice">${escape_html(lastSync.message)}</p>` : ""}
-    </section>
-  `;
-}
-
 function render_action_panel(): string {
   if (!lastSync) return "";
+  const self = self_presence();
+  const foxButtonLabel = self?.role === "fox" ? "Deixar de ser raposa" : "Ser raposa";
 
-  const lobby = lastSync.phase === "lobby";
-  const canManageLobby = can_self_manage_lobby();
-  const hasMaster = Boolean(lastSync.masterName);
-  const selfCanToggleMaster = !hasMaster || is_self_master();
-  const selfParticipant = self_presence()?.seat === "participant";
-  const masterButtonLabel = is_self_master() ? "Deixar de ser mestre" : "Virar mestre";
-  const foxButtonLabel = self_is_fox_candidate() ? "Deixar de ser raposa" : "Se tornar raposa";
+  if (lastSync.phase === "lobby") {
+    return `
+      <section class="panel stack">
+        <div class="panel-header">
+          <h2 class="section-title">Acoes do lobby</h2>
+          <span class="tag">${lastSync.lobbyState?.allConnectedReady ? "auto start" : "manual"}</span>
+        </div>
+        <div class="action-stack">
+          <button class="btn ${is_self_master() ? "btn-danger" : "btn-primary"} btn-block" data-action="claim-master" type="button">
+            ${is_self_master() ? "Deixar de ser mestre" : "Virar mestre"}
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="random-map" type="button" ${self?.seat === "participant" ? "" : "disabled"}>
+            Mapa aleatorio
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="shuffle-fox" type="button" ${self?.seat === "participant" ? "" : "disabled"}>
+            Sortear raposa
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="toggle-self-fox" type="button" ${self?.seat === "participant" && !is_self_master() ? "" : "disabled"}>
+            ${foxButtonLabel}
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="open-editor" type="button" ${is_self_master() ? "" : "disabled"}>
+            Abrir editor
+          </button>
+          <button class="btn btn-primary btn-block" data-action="start-game" type="button" ${is_self_master() ? "" : "disabled"}>
+            Play
+          </button>
+        </div>
+      </section>
+    `;
+  }
 
   return `
     <section class="panel stack">
-      <h2 class="section-title">Acoes</h2>
+      <div class="panel-header">
+        <h2 class="section-title">Partida</h2>
+        <span class="tag">${lastSync.publicState?.round ?? 0}</span>
+      </div>
+      <p class="metric"><strong>Na tela:</strong> ${escape_html(uiState.watchName ?? lastSync.selfName)}</p>
+      <p class="metric"><strong>Turno:</strong> ${escape_html(lastSync.publicState?.currentTurnName ?? "Aguardando")}</p>
       <div class="action-stack">
-        <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link da sala</button>
         <button class="btn btn-secondary btn-block" data-action="toggle-follow-turn" type="button">
           ${uiState.followTurn ? "Parar de acompanhar a vez" : "Acompanhar a vez"}
         </button>
         <button
-          class="btn ${is_self_master() ? "btn-danger" : "btn-primary"} btn-block"
-          data-action="claim-master"
-          type="button"
-          ${lobby && selfCanToggleMaster ? "" : "disabled"}
-        >
-          ${masterButtonLabel}
-        </button>
-        <button
           class="btn btn-secondary btn-block"
-          data-action="random-map"
+          data-action="reveal-full-map"
           type="button"
-          ${lobby && canManageLobby ? "" : "disabled"}
+          ${can_reveal_full_map() ? "" : "disabled"}
         >
-          Mapa aleatorio
+          Ficar de espectador
         </button>
-        <button
-          class="btn btn-secondary btn-block"
-          data-action="shuffle-fox"
-          type="button"
-          ${lobby && canManageLobby ? "" : "disabled"}
-        >
-          Sortear raposa
-        </button>
-        <button
-          class="btn btn-secondary btn-block"
-          data-action="toggle-self-fox"
-          type="button"
-          ${lobby && canManageLobby && selfParticipant ? "" : "disabled"}
-        >
-          ${foxButtonLabel}
-        </button>
-        <button
-          class="btn btn-primary btn-block"
-          data-action="start-game"
-          type="button"
-          ${lobby && canManageLobby ? "" : "disabled"}
-        >
-          Play
-        </button>
+        ${
+          lastSync.phase === "game_over"
+            ? '<button class="btn btn-primary btn-block" data-action="back-to-lobby" type="button">Voltar ao lobby</button>'
+            : ""
+        }
       </div>
+      ${uiState.toast ? `<p class="toast">${escape_html(uiState.toast)}</p>` : ""}
     </section>
   `;
 }
 
-function render_side_rail(): string {
-  const toggleLabel = uiState.sideRailOpen ? "Fechar telas" : "Abrir telas";
-
-  if (!lastSync?.publicState) {
-    return `
-      <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
-        <button class="ghost-btn dock-toggle" data-action="toggle-rail" type="button" aria-label="${toggleLabel}" title="${toggleLabel}">
-          <span class="screen-icon" aria-hidden="true"></span>
-          <span class="dock-toggle-copy">
-            <strong>Telas</strong>
-            <small>Visoes</small>
-          </span>
-        </button>
-      </aside>
-    `;
-  }
-  const sync = lastSync;
-  const publicState = sync.publicState!;
-  const activeName = uiState.watchName ?? sync.selfName;
-
-  const orderedNames = [
-    sync.selfName,
-    ...publicState.watchOrder.filter((name) => name !== sync.selfName),
-  ];
-
+function render_feed_panel(): string {
+  if (!lastSync) return "";
   return `
-    <aside class="side-rail ${uiState.sideRailOpen ? "" : "collapsed"}">
-      <button class="ghost-btn dock-toggle" data-action="toggle-rail" type="button" aria-label="${toggleLabel}" title="${toggleLabel}">
-        <span class="screen-icon" aria-hidden="true"></span>
-        <span class="dock-toggle-copy">
-          <strong>Telas</strong>
-          <small>${escape_html(activeName)}</small>
-        </span>
-      </button>
-      ${
-        uiState.sideRailOpen
-          ? `
-            <div class="side-rail-body">
-              ${orderedNames
-                .map((name) => {
-                  const view = publicState.screens[name];
-                  const player = sync.players.find((item) => item.name === name);
-                  const isActive = activeName === name;
-                  return `
-                    <button
-                      class="screen-card ${isActive ? "active" : ""}"
-                      data-action="watch-screen"
-                      data-name="${escape_html(name)}"
-                      type="button"
-                    >
-                      <div class="screen-card-header">
-                        <span class="legend-color" style="background:${player?.color ?? "#000"}"></span>
-                        <strong>${escape_html(name)}</strong>
-                      </div>
-                      <div class="screen-card-body">
-                        <span>${escape_html(role_label(player?.role ?? "player"))}</span>
-                        <span>${escape_html(view?.roomType ? room_type_label(view.roomType) : "sem sala")}</span>
-                        <span>${escape_html(view ? `${view.exits.length} saidas` : "-")}</span>
-                      </div>
-                    </button>
-                  `;
-                })
-                .join("")}
-            </div>
-          `
-          : ""
-      }
-    </aside>
+    <section class="panel stack feed-panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="section-title">Chat e log</h2>
+          <p class="helper">Mensagens digitadas e avisos do sistema ficam juntos, com estilos diferentes.</p>
+        </div>
+      </div>
+      <div class="feed-list">
+        ${
+          lastSync.feed.length > 0
+            ? lastSync.feed.map((entry) => render_feed_entry(entry)).join("")
+            : '<div class="empty-panel feed-empty">Sem mensagens ainda.</div>'
+        }
+      </div>
+      <form data-form="chat" class="chat-form">
+        <textarea
+          name="chat"
+          rows="3"
+          maxlength="280"
+          placeholder="Digite algo para a sala..."
+        >${escape_html(uiState.chatInput)}</textarea>
+        <button class="btn btn-primary btn-block" type="submit">Enviar</button>
+      </form>
+    </section>
+  `;
+}
+
+function render_feed_entry(entry: FeedEntry): string {
+  const isSelf = entry.actorName && entry.actorName === lastSync?.selfName;
+  return `
+    <article class="feed-entry ${entry.kind} ${isSelf ? "is-self" : ""}">
+      <header>
+        <strong>${escape_html(entry.kind === "chat" ? entry.actorName ?? "anon" : "sistema")}</strong>
+        <span>${entry.kind === "chat" ? "fala" : "acao"}</span>
+      </header>
+      <p>${escape_html(entry.text)}</p>
+    </article>
   `;
 }
 
 function render_modal(): string {
-  return "";
+  if (!uiState.editorOpen || !editorState || !lastSync || !is_self_master()) {
+    return "";
+  }
+
+  const selectedRoom = uiState.selectedRoomId ? editorState.rooms[uiState.selectedRoomId] : null;
+
+  return `
+    <div class="modal-backdrop">
+      <section class="modal-card modal-wide">
+        <div class="panel-header">
+          <div>
+            <h2 class="section-title">Editor do mestre</h2>
+            <p class="helper">Use o mouse para arrastar salas e conectar corredores.</p>
+          </div>
+          <button class="btn btn-secondary" data-action="close-modal" type="button">Fechar</button>
+        </div>
+        <div class="button-row">
+          <button class="btn btn-secondary" data-action="editor-add-room" type="button">Nova sala</button>
+          <button class="btn btn-secondary" data-action="editor-default" type="button">Mapa 3x3</button>
+        </div>
+        <svg class="editor-map" data-editor-svg viewBox="0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}">
+          ${render_maze_svg(editorState, true)}
+        </svg>
+        <div class="editor-toolbar">
+          <div class="metric-block">
+            <strong>Sala selecionada</strong>
+            <span>${escape_html(selectedRoom?.id ?? "nenhuma")}</span>
+          </div>
+          <div class="metric-block">
+            <strong>Tipo</strong>
+            <span>${escape_html(selectedRoom?.type ?? "-")}</span>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-secondary" data-action="editor-connect" type="button" ${selectedRoom ? "" : "disabled"}>
+              ${uiState.connectSourceRoomId ? "Clique em outra sala" : "Conectar"}
+            </button>
+            <button class="btn btn-secondary" data-action="editor-cycle-type" type="button" ${selectedRoom ? "" : "disabled"}>
+              Alternar tipo
+            </button>
+            <button class="btn btn-secondary" data-action="editor-loop" type="button" ${selectedRoom ? "" : "disabled"}>
+              Loop
+            </button>
+            <button class="btn btn-danger" data-action="editor-remove-room" type="button" ${selectedRoom ? "" : "disabled"}>
+              Remover
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function render_maze_svg(state: FullGameState, editable: boolean): string {
-  const playersByRoom = new Map<string, Array<{ name: string; color: string; role: string }>>();
+  const playersByRoom = new Map<string, Array<{ name: string; color: string }>>();
   for (const player of Object.values(state.players)) {
     if (!player.locationRoomId) continue;
     if (!playersByRoom.has(player.locationRoomId)) {
@@ -1194,7 +983,6 @@ function render_maze_svg(state: FullGameState, editable: boolean): string {
     playersByRoom.get(player.locationRoomId)?.push({
       name: player.name,
       color: player.color,
-      role: player.role,
     });
   }
 
@@ -1225,12 +1013,12 @@ function render_maze_svg(state: FullGameState, editable: boolean): string {
       .join("")}
     ${Object.values(state.rooms)
       .map((room) => {
-        const selected = uiState.selectedRoomId === room.id;
-        const connectArmed = uiState.connectSourceRoomId === room.id;
+        const selected = editable && uiState.selectedRoomId === room.id;
+        const connectArmed = editable && uiState.connectSourceRoomId === room.id;
         const tokens = playersByRoom.get(room.id) ?? [];
         return `
           <g
-            data-room-node="${escape_html(room.id)}"
+            ${editable ? `data-room-node="${escape_html(room.id)}"` : ""}
             class="room-node ${selected ? "selected" : ""} ${connectArmed ? "armed" : ""}"
             transform="translate(${room.x}, ${room.y})"
           >
@@ -1266,7 +1054,7 @@ function render_stickman(name: string, color: string): string {
 
 function bind_editor_canvas(): void {
   const svg = root.querySelector<SVGSVGElement>("[data-editor-svg]");
-  if (!svg || !can_edit_lobby_map() || lastSync?.phase !== "lobby" || !masterState) {
+  if (!svg || !uiState.editorOpen || !editorState || !lastSync || lastSync.phase !== "lobby" || !is_self_master()) {
     return;
   }
 
@@ -1291,11 +1079,14 @@ function bind_editor_canvas(): void {
       return;
     }
 
-    if (uiState.connectSourceRoomId && uiState.connectSourceRoomId !== roomId && masterState) {
-      masterState = toggle_corridor(masterState, uiState.connectSourceRoomId, roomId);
+    if (uiState.connectSourceRoomId && uiState.connectSourceRoomId !== roomId) {
+      const sourceRoomId = uiState.connectSourceRoomId;
       uiState.connectSourceRoomId = null;
-      publish_master_state();
-      render();
+      handle_editor_action({
+        type: "toggle_corridor",
+        leftRoomId: sourceRoomId,
+        rightRoomId: roomId,
+      });
       return;
     }
 
@@ -1312,32 +1103,164 @@ function bind_editor_canvas(): void {
   };
 
   svg.onpointermove = (event) => {
-    if (!uiState.dragRoomId || uiState.connectSourceRoomId || !masterState) {
+    if (!uiState.dragRoomId || uiState.connectSourceRoomId || !editorState) {
       return;
     }
     const point = toPoint(event);
-    masterState = move_room(masterState, uiState.dragRoomId, point.x, point.y);
+    editorState = apply_map_edit(editorState, {
+      type: "move_room",
+      roomId: uiState.dragRoomId,
+      x: point.x,
+      y: point.y,
+    });
     render();
   };
 
   svg.onpointerup = () => {
-    if (uiState.dragRoomId) {
-      uiState.dragRoomId = null;
-      publish_master_state();
+    if (!uiState.dragRoomId || !editorState) {
+      return;
+    }
+    const room = editorState.rooms[uiState.dragRoomId];
+    const roomId = uiState.dragRoomId;
+    uiState.dragRoomId = null;
+    if (room) {
+      handle_editor_action({
+        type: "move_room",
+        roomId,
+        x: room.x,
+        y: room.y,
+      });
+    } else {
       render();
     }
   };
 }
 
+function open_editor(): void {
+  if (!lastSync || lastSync.phase !== "lobby" || !is_self_master()) {
+    return;
+  }
+  uiState.editorOpen = true;
+  uiState.selectedRoomId = null;
+  uiState.connectSourceRoomId = null;
+  editorState = clone_state(lastSync.fullState);
+  render();
+}
+
+function close_editor(): void {
+  uiState.editorOpen = false;
+  uiState.dragRoomId = null;
+  uiState.selectedRoomId = null;
+  uiState.connectSourceRoomId = null;
+  editorState = null;
+  render();
+}
+
+function handle_editor_action(action: MapEditAction, rerender = true): void {
+  if (!lastSync || lastSync.phase !== "lobby" || !is_self_master() || !editorState) {
+    return;
+  }
+  editorState = apply_map_edit(editorState, action);
+  post_transport({
+    $: "map_edit",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    action,
+  });
+  if (rerender) {
+    render();
+  }
+}
+
+function send_chat_message(): void {
+  if (!lastSync) {
+    return;
+  }
+  const text = uiState.chatInput.trim();
+  if (!text) {
+    return;
+  }
+  post_transport({
+    $: "lobby_chat_message",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    text,
+  });
+  uiState.chatInput = "";
+  render();
+}
+
+function handle_move(corridorId: string | null): void {
+  if (!lastSync) {
+    return;
+  }
+  const actorName = action_actor_name();
+  if (!actorName) {
+    return;
+  }
+
+  post_transport({
+    $: "submit_move",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    actorName,
+    corridorId,
+  });
+}
+
+function handle_kill(targetName: string): void {
+  if (!lastSync || !targetName) {
+    return;
+  }
+  const actorName = action_actor_name();
+  if (!actorName) {
+    return;
+  }
+
+  post_transport({
+    $: "select_kill_target",
+    name: lastSync.selfName,
+    sessionId: activeSessionId,
+    actorName,
+    targetName,
+  });
+}
+
+function action_actor_name(): string | null {
+  if (!lastSync?.publicState?.currentTurnName) {
+    return null;
+  }
+  if (can_self_act()) {
+    return lastSync.selfName;
+  }
+  if (is_self_master()) {
+    return lastSync.publicState.currentTurnName;
+  }
+  return null;
+}
+
+function can_self_act(): boolean {
+  if (!lastSync?.publicState?.currentTurnName) {
+    return false;
+  }
+  return lastSync.publicState.currentTurnName === lastSync.selfName;
+}
+
 function should_show_full_map(): boolean {
   if (!lastSync) return false;
   if (is_self_master()) return true;
-  const self = lastSync.fullState?.players[lastSync.selfName];
+  const self = lastSync.fullState.players[lastSync.selfName];
   const presence = self_presence();
   if (presence?.seat === "spectator" && lastSync.phase !== "lobby") {
     return true;
   }
   return Boolean(self && !self.alive && uiState.revealFullMap);
+}
+
+function can_reveal_full_map(): boolean {
+  if (!lastSync) return false;
+  const self = lastSync.fullState.players[lastSync.selfName];
+  return Boolean(self && !self.alive && self.seat === "participant" && !uiState.revealFullMap);
 }
 
 function self_presence(): Presence | null {
@@ -1346,26 +1269,6 @@ function self_presence(): Presence | null {
 
 function is_self_master(): boolean {
   return Boolean(lastSync && lastSync.masterName === lastSync.selfName);
-}
-
-function is_self_controller(): boolean {
-  return Boolean(lastSync && lastSync.controllerName === lastSync.selfName);
-}
-
-function can_publish_state(): boolean {
-  return is_self_controller();
-}
-
-function can_self_manage_lobby(): boolean {
-  return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
-}
-
-function can_edit_lobby_map(): boolean {
-  return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
-}
-
-function self_is_fox_candidate(): boolean {
-  return Boolean(lastSync && masterState && masterState.foxCandidateName === lastSync.selfName);
 }
 
 function role_label(role: string): string {
@@ -1379,7 +1282,7 @@ function role_label(role: string): string {
     case "spectator":
       return "espectador";
     default:
-      return "jogador";
+      return "galinha";
   }
 }
 
@@ -1388,9 +1291,7 @@ function phase_label(phase: string): string {
     case "lobby":
       return "lobby";
     case "running":
-      return "partida em andamento";
-    case "paused_master_disconnect":
-      return "pausado";
+      return "partida";
     case "game_over":
       return "fim da partida";
     default:
@@ -1419,8 +1320,8 @@ function position_exits(exits: LimitedPlayerView["exits"]): Array<{
     }
     previousAngle = exit.angle;
     const radians = (exit.angle * Math.PI) / 180;
-    const radiusX = 40 + ring * 8;
-    const radiusY = 28 + ring * 6;
+    const radiusX = 40 + ring * 9;
+    const radiusY = 28 + ring * 7;
     const left = 50 + Math.cos(radians) * radiusX;
     const top = 50 + Math.sin(radians) * radiusY;
     return {

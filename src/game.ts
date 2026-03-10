@@ -1,9 +1,12 @@
 import type {
-  ActionRequest,
   Corridor,
   ExitInfo,
+  FeedEntry,
   FullGameState,
   FullPlayerState,
+  LimitedPlayerView,
+  LobbyState,
+  MapEditAction,
   MazeRoom,
   NetPost,
   PlayerRole,
@@ -11,7 +14,6 @@ import type {
   PublicState,
   RoomType,
   RoomSync,
-  SeatType,
   TransportPlayer,
   TransportState,
 } from "./protocol";
@@ -28,6 +30,7 @@ const PRESENCE_COLORS = [
   "#f18f01",
 ];
 const HEARTBEAT_GRACE_TICKS = 24;
+const FEED_LIMIT = 120;
 const SAVED_MAZE_SEEDS = [
   101, 207, 311, 419, 523, 631, 733, 839, 947, 1051,
   1153, 1259, 1361, 1471, 1579, 1681, 1789, 1891, 1993, 2099,
@@ -53,6 +56,401 @@ function normalized_id_pair(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
 }
 
+function feed_id(state: FullGameState, prefix: string): string {
+  return `${prefix}-${state.feed.length + 1}-${state.round}-${state.currentTurnName ?? "none"}`;
+}
+
+function trim_feed(state: FullGameState): void {
+  if (state.feed.length > FEED_LIMIT) {
+    state.feed = state.feed.slice(-FEED_LIMIT);
+  }
+}
+
+function append_feed(state: FullGameState, entry: FeedEntry): void {
+  state.feed.push(entry);
+  trim_feed(state);
+}
+
+function append_system_entry(state: FullGameState, actorName: string | null, text: string): void {
+  append_feed(state, {
+    id: feed_id(state, "system"),
+    kind: "system",
+    actorName,
+    text,
+    createdAt: state.feed.length + 1,
+  });
+}
+
+function append_chat_entry(state: FullGameState, actorName: string, text: string): void {
+  append_feed(state, {
+    id: feed_id(state, "chat"),
+    kind: "chat",
+    actorName,
+    text,
+    createdAt: state.feed.length + 1,
+  });
+}
+
+function connected_lobby_players(roster: Presence[]): Presence[] {
+  return roster.filter((player) => player.seat === "participant" && player.connected);
+}
+
+function active_game_players(roster: Presence[], masterName: string | null): Presence[] {
+  return roster.filter((player) => (
+    player.seat === "participant" &&
+    player.connected &&
+    player.name !== masterName
+  ));
+}
+
+function auto_start_seed(state: TransportState, name: string): number {
+  const source = `${state.clockTick}:${name}:${Object.keys(state.roster).join("|")}`;
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function pick_extreme_room(
+  rooms: MazeRoom[],
+  axis: "x" | "y",
+  direction: 1 | -1,
+  preferredCenter: number,
+  tieAxis: "x" | "y",
+): MazeRoom | null {
+  if (rooms.length === 0) {
+    return null;
+  }
+
+  const ordered = [...rooms].sort((left, right) => {
+    const primaryDelta = direction * (left[axis] - right[axis]);
+    if (primaryDelta !== 0) {
+      return primaryDelta;
+    }
+    return Math.abs(left[tieAxis] - preferredCenter) - Math.abs(right[tieAxis] - preferredCenter);
+  });
+
+  return ordered[0] ?? null;
+}
+
+function graph_edges(graph: Map<string, Array<[string, string]>>): Array<[string, string]> {
+  const seen = new Set<string>();
+  const edges: Array<[string, string]> = [];
+
+  for (const entries of graph.values()) {
+    for (const [left, right] of entries) {
+      const [a, b] = normalized_id_pair(left, right);
+      const key = `${a}:${b}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      edges.push([a, b]);
+    }
+  }
+
+  return edges;
+}
+
+function shuffle_with_rng<T>(items: T[], rng: () => number): T[] {
+  const next = [...items];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(rng() * (index + 1));
+    const current = next[index];
+    next[index] = next[swapIndex] as T;
+    next[swapIndex] = current as T;
+  }
+  return next;
+}
+
+function seeded_rng(seed: number): () => number {
+  let value = seed >>> 0;
+  return () => {
+    value = (value * 1664525 + 1013904223) >>> 0;
+    return value / 4294967296;
+  };
+}
+
+function is_transport_player_connected(state: TransportState, player: TransportPlayer): boolean {
+  if (!player.activeSessionId) {
+    return false;
+  }
+  return state.clockTick - player.lastSeenTick <= HEARTBEAT_GRACE_TICKS;
+}
+
+function is_current_session(state: TransportState, name: string, sessionId: string): boolean {
+  return state.roster[name]?.activeSessionId === sessionId;
+}
+
+function make_presence(state: TransportState, player: TransportPlayer): Presence {
+  const fullPlayer = state.fullState.players[player.name];
+  return {
+    name: player.name,
+    color: fullPlayer?.color ?? player.color,
+    joinedAt: fullPlayer?.joinedAt ?? player.joinedAt,
+    connected: is_transport_player_connected(state, player),
+    seat: fullPlayer?.seat ?? player.seat,
+    role: fullPlayer?.role ?? "hen",
+    alive: fullPlayer?.alive ?? false,
+    ready: fullPlayer?.ready ?? false,
+  };
+}
+
+function roster_list(state: TransportState): Presence[] {
+  return Object.values(state.roster)
+    .sort((left, right) => left.joinedAt - right.joinedAt)
+    .map((player) => make_presence(state, player));
+}
+
+function sync_lobby_roles(state: FullGameState): void {
+  if (state.masterName && state.foxName === state.masterName) {
+    state.foxName = null;
+  }
+
+  for (const player of Object.values(state.players)) {
+    player.alive = false;
+    player.locationRoomId = null;
+    if (player.seat === "spectator") {
+      player.role = "spectator";
+      player.ready = false;
+      player.hasFullInfo = true;
+      continue;
+    }
+    if (state.masterName === player.name) {
+      player.role = "master";
+      player.hasFullInfo = true;
+      continue;
+    }
+    player.role = state.foxName === player.name ? "fox" : "hen";
+    player.hasFullInfo = false;
+  }
+}
+
+function should_auto_start(state: TransportState): boolean {
+  if (state.fullState.phase !== "lobby") {
+    return false;
+  }
+  const players = connected_lobby_players(roster_list(state));
+  return players.length >= 2 && players.every((player) => player.ready);
+}
+
+function sync_full_player(state: TransportState, transportPlayer: TransportPlayer): void {
+  const existing = state.fullState.players[transportPlayer.name];
+  if (existing) {
+    existing.color = transportPlayer.color;
+    existing.joinedAt = transportPlayer.joinedAt;
+    existing.seat = transportPlayer.seat;
+    if (transportPlayer.seat === "spectator") {
+      existing.role = "spectator";
+      existing.ready = false;
+      existing.alive = false;
+      existing.locationRoomId = null;
+      existing.hasFullInfo = true;
+    }
+    return;
+  }
+
+  state.fullState.players[transportPlayer.name] = {
+    name: transportPlayer.name,
+    color: transportPlayer.color,
+    joinedAt: transportPlayer.joinedAt,
+    seat: transportPlayer.seat,
+    role: transportPlayer.seat === "spectator" ? "spectator" : "hen",
+    alive: false,
+    locationRoomId: null,
+    hasFullInfo: transportPlayer.seat === "spectator",
+    ready: false,
+  };
+}
+
+function apply_random_map(state: FullGameState, seed: number): void {
+  const maze = build_saved_maze(seed);
+  state.rooms = maze.rooms;
+  state.corridors = maze.corridors;
+  for (const player of Object.values(state.players)) {
+    player.locationRoomId = null;
+  }
+}
+
+function set_selected_fox(state: FullGameState, foxName: string | null): void {
+  const player = foxName ? state.players[foxName] : null;
+  if (!player || player.seat !== "participant" || player.role === "master") {
+    state.foxName = null;
+  } else {
+    state.foxName = foxName;
+  }
+  if (state.phase === "lobby") {
+    sync_lobby_roles(state);
+  }
+}
+
+function start_game_with_seed(base: TransportState, seed: number, reason: string): TransportState {
+  const next = clone_state(base);
+  const roster = roster_list(next);
+  const active = active_game_players(roster, next.fullState.masterName);
+
+  if (active.length < 2 || active.length > 8) {
+    return base;
+  }
+
+  const roomIds = Object.keys(next.fullState.rooms);
+  if (roomIds.length === 0) {
+    return base;
+  }
+
+  const rng = seeded_rng(seed);
+  const orderedActive = [...active].sort((left, right) => left.joinedAt - right.joinedAt);
+  const foxName = next.fullState.foxName && orderedActive.some((player) => player.name === next.fullState.foxName)
+    ? next.fullState.foxName
+    : orderedActive[Math.floor(rng() * orderedActive.length)]?.name ?? null;
+
+  if (!foxName) {
+    return base;
+  }
+
+  const shuffledRooms = shuffle_with_rng(roomIds, rng);
+  const henOrder = orderedActive.filter((player) => player.name !== foxName).map((player) => player.name);
+
+  for (const player of Object.values(next.fullState.players)) {
+    if (player.seat === "spectator") {
+      player.role = "spectator";
+      player.alive = false;
+      player.locationRoomId = null;
+      player.hasFullInfo = true;
+      player.ready = false;
+      continue;
+    }
+
+    if (player.name === next.fullState.masterName) {
+      player.role = "master";
+      player.alive = false;
+      player.locationRoomId = null;
+      player.hasFullInfo = true;
+      player.ready = false;
+      continue;
+    }
+
+    const activeIndex = orderedActive.findIndex((presence) => presence.name === player.name);
+    if (activeIndex === -1) {
+      player.role = "hen";
+      player.alive = false;
+      player.locationRoomId = null;
+      player.hasFullInfo = false;
+      player.ready = false;
+      continue;
+    }
+
+    player.role = player.name === foxName ? "fox" : "hen";
+    player.alive = true;
+    player.locationRoomId = shuffledRooms[activeIndex % shuffledRooms.length] ?? roomIds[0] ?? null;
+    player.hasFullInfo = false;
+    player.ready = false;
+  }
+
+  next.fullState.phase = "running";
+  next.fullState.round = 1;
+  next.fullState.currentTurnName = henOrder[0] ?? foxName;
+  next.fullState.henOrder = henOrder;
+  next.fullState.pendingKillTargets = [];
+  next.fullState.foxName = foxName;
+  append_system_entry(next.fullState, null, reason);
+  return next;
+}
+
+function reset_to_lobby_state(base: TransportState, actorName: string | null, text: string): TransportState {
+  const next = clone_state(base);
+  next.fullState.phase = "lobby";
+  next.fullState.round = 0;
+  next.fullState.currentTurnName = null;
+  next.fullState.henOrder = [];
+  next.fullState.pendingKillTargets = [];
+  next.fullState.foxName = null;
+  for (const player of Object.values(next.fullState.players)) {
+    player.alive = false;
+    player.locationRoomId = null;
+    player.ready = false;
+    if (player.seat === "spectator") {
+      player.role = "spectator";
+      player.hasFullInfo = true;
+    } else if (next.fullState.masterName === player.name) {
+      player.role = "master";
+      player.hasFullInfo = true;
+    } else {
+      player.role = "hen";
+      player.hasFullInfo = false;
+    }
+  }
+  append_system_entry(next.fullState, actorName, text);
+  return next;
+}
+
+function living_hens_in_room(state: FullGameState, roomId: string | null): string[] {
+  if (!roomId) {
+    return [];
+  }
+  return Object.values(state.players)
+    .filter((player) => player.role === "hen" && player.alive && player.locationRoomId === roomId)
+    .map((player) => player.name);
+}
+
+function advance_turn(state: FullGameState): FullGameState {
+  const livingHens = state.henOrder.filter((name) => state.players[name]?.alive);
+  const order = [
+    ...livingHens,
+    ...(state.foxName && state.players[state.foxName]?.alive ? [state.foxName] : []),
+  ];
+
+  if (order.length === 0) {
+    state.phase = "game_over";
+    state.currentTurnName = null;
+    append_system_entry(state, null, "Partida encerrada.");
+    return state;
+  }
+
+  const currentIndex = state.currentTurnName ? order.indexOf(state.currentTurnName) : -1;
+  const nextIndex = currentIndex + 1;
+
+  if (currentIndex === -1 || nextIndex >= order.length) {
+    state.round = Math.max(1, state.round) + (currentIndex === -1 ? 0 : 1);
+    state.currentTurnName = order[0] ?? null;
+  } else {
+    state.currentTurnName = order[nextIndex] ?? null;
+  }
+
+  state.pendingKillTargets = [];
+  return state;
+}
+
+function eliminate_hen(state: FullGameState, targetName: string): FullGameState {
+  const target = state.players[targetName];
+  if (!target) {
+    return state;
+  }
+  target.alive = false;
+  target.hasFullInfo = true;
+  state.pendingKillTargets = [];
+  append_system_entry(state, state.foxName, `${targetName} foi capturada.`);
+
+  const anyHenAlive = Object.values(state.players).some((player) => player.role === "hen" && player.alive);
+  if (!anyHenAlive) {
+    state.phase = "game_over";
+    state.currentTurnName = null;
+    append_system_entry(state, state.foxName, "A raposa venceu a partida.");
+    return state;
+  }
+
+  return advance_turn(state);
+}
+
+function can_post_as_actor(state: TransportState, postName: string, actorName: string): boolean {
+  if (postName === actorName) {
+    return true;
+  }
+  return state.fullState.masterName === postName;
+}
+
 export function clone_state<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -69,275 +467,236 @@ export function encode_transport_post(post: NetPost): string {
   return JSON.stringify(post);
 }
 
-export function create_transport_state(): TransportState {
-  return {
-    phase: "lobby",
-    masterName: null,
-    roster: {},
-    publicState: null,
-    fullState: null,
-    actionRequests: [],
-    consumedActionIds: [],
-    message: null,
-    clockTick: 0,
-    nextJoinOrder: 0,
-  };
-}
-
-export function tick_transport_state(state: TransportState): TransportState {
-  return {
-    ...state,
-    clockTick: state.clockTick + 1,
-  };
-}
-
 export function saved_maze_count(): number {
   return SAVED_MAZE_SEEDS.length;
 }
 
-export function pick_random_saved_maze(): Pick<FullGameState, "rooms" | "corridors"> {
-  const seed = SAVED_MAZE_SEEDS[Math.floor(Math.random() * SAVED_MAZE_SEEDS.length)] ?? SAVED_MAZE_SEEDS[0];
-  return build_saved_maze(seed);
+export function pick_random_saved_maze_seed(): number {
+  return SAVED_MAZE_SEEDS[Math.floor(Math.random() * SAVED_MAZE_SEEDS.length)] ?? SAVED_MAZE_SEEDS[0];
 }
 
-export function apply_transport_post(raw: string, state: TransportState): TransportState {
-  let post: NetPost;
-  try {
-    post = JSON.parse(raw) as NetPost;
-  } catch {
-    return state;
+export function pick_random_fox_name(players: Presence[], masterName: string | null): string | null {
+  const candidates = players.filter((player) => (
+    player.seat === "participant" &&
+    player.connected &&
+    player.name !== masterName
+  ));
+  if (candidates.length === 0) {
+    return null;
   }
-
-  switch (post.$) {
-    case "join_room":
-      return handle_join_post(state, post);
-    case "heartbeat":
-      return handle_heartbeat_post(state, post);
-    case "claim_master":
-      return handle_claim_master_post(state, post);
-    case "unclaim_master":
-      return handle_unclaim_master_post(state, post);
-    case "publish_state":
-      return handle_publish_state_post(state, post);
-    case "submit_move":
-      return handle_action_request_post(state, {
-        id: post.requestId,
-        type: "move",
-        actorName: post.actorName,
-        corridorId: post.corridorId,
-      }, post.name, post.sessionId);
-    case "select_kill_target":
-      return handle_action_request_post(state, {
-        id: post.requestId,
-        type: "kill",
-        actorName: post.actorName,
-        targetName: post.targetName,
-      }, post.name, post.sessionId);
-    default:
-      return state;
-  }
+  return candidates[Math.floor(Math.random() * candidates.length)]?.name ?? null;
 }
 
-export function derive_room_sync(room: string, selfName: string, state: TransportState): RoomSync {
-  const consumed = new Set(state.consumedActionIds);
-  const controllerName = transport_controller_name(state);
-  const players = Object.values(state.roster)
-    .sort((left, right) => left.joinedAt - right.joinedAt)
-    .map((player) => {
-      const synced = state.fullState?.players[player.name];
-      const isMaster = state.masterName === player.name;
-      const seat = synced?.seat ?? player.seat;
-      const role = synced?.role ?? (isMaster ? "master" : seat === "spectator" ? "spectator" : "player");
-      return {
-        name: player.name,
-        color: synced?.color ?? player.color,
-        joinedAt: synced?.joinedAt ?? player.joinedAt,
-        connected: is_transport_player_connected(state, player),
-        seat,
-        isMaster,
-        role,
-        alive: synced?.alive ?? false,
-      };
-    });
+export function compute_angle(from: MazeRoom, to: MazeRoom): number {
+  const radians = Math.atan2(to.y - from.y, to.x - from.x);
+  return Math.round((((radians * 180) / Math.PI) + 360) % 360);
+}
 
-  const self = players.find((player) => player.name === selfName) ?? null;
-  const pendingActions = state.actionRequests.filter((action) => !consumed.has(action.id));
+export function create_room(id: string, x: number, y: number, type: RoomType = "normal"): MazeRoom {
+  return { id, x, y, type };
+}
 
+export function make_corridor(fromRoom: MazeRoom, toRoom: MazeRoom): Corridor {
   return {
-    room,
-    selfName,
-    phase: state.phase,
-    masterName: state.masterName,
-    controllerName,
-    players,
-    publicState: state.publicState,
-    fullState: state.fullState,
-    canClaimMaster: state.phase === "lobby" && !state.masterName && self?.seat !== "spectator",
-    canBecomeMaster: false,
-    swapMode: "none",
-    swapVotes: [],
-    eligibleNames: [],
-    message: state.message,
-    pendingActions,
+    id: corridor_id(fromRoom.id, toRoom.id),
+    fromRoomId: fromRoom.id,
+    toRoomId: toRoom.id,
+    angleFrom: compute_angle(fromRoom, toRoom),
+    angleTo: compute_angle(toRoom, fromRoom),
   };
 }
 
-function handle_join_post(state: TransportState, post: Extract<NetPost, { $: "join_room" }>): TransportState {
-  const next = clone_state(state);
-  const existing = next.roster[post.name];
+export function create_default_maze(): Pick<FullGameState, "rooms" | "corridors"> {
+  const rooms: Record<string, MazeRoom> = {};
+  const corridors: Record<string, Corridor> = {};
 
-  if (existing) {
-    existing.activeSessionId = post.sessionId;
-    existing.lastSeenTick = next.clockTick;
-    next.message = null;
-    return next;
-  }
-
-  const joinedAt = next.nextJoinOrder + 1;
-  const player: TransportPlayer = {
-    name: post.name,
-    color: PRESENCE_COLORS[next.nextJoinOrder % PRESENCE_COLORS.length] ?? PRESENCE_COLORS[0],
-    joinedAt,
-    seat: next.phase === "lobby" ? "participant" : "spectator",
-    activeSessionId: post.sessionId,
-    lastSeenTick: next.clockTick,
-  };
-
-  next.nextJoinOrder += 1;
-  next.roster[player.name] = player;
-  next.message = next.phase === "lobby" ? null : "Partida em andamento. Novo ingresso como espectador.";
-  return next;
-}
-
-function handle_heartbeat_post(state: TransportState, post: Extract<NetPost, { $: "heartbeat" }>): TransportState {
-  if (!is_current_session(state, post.name, post.sessionId)) {
-    return state;
-  }
-
-  const next = clone_state(state);
-  const player = next.roster[post.name];
-  if (!player) {
-    return state;
-  }
-  player.lastSeenTick = next.clockTick;
-  return next;
-}
-
-function handle_claim_master_post(state: TransportState, post: Extract<NetPost, { $: "claim_master" }>): TransportState {
-  if (state.phase !== "lobby" || state.masterName || !is_current_session(state, post.name, post.sessionId)) {
-    return state;
-  }
-
-  const next = clone_state(state);
-  next.masterName = post.name;
-  next.message = `${post.name} virou mestre.`;
-  return next;
-}
-
-function handle_unclaim_master_post(state: TransportState, post: Extract<NetPost, { $: "unclaim_master" }>): TransportState {
-  if (state.phase !== "lobby" || state.masterName !== post.name || !is_current_session(state, post.name, post.sessionId)) {
-    return state;
-  }
-
-  const next = clone_state(state);
-  next.masterName = null;
-  next.message = `${post.name} deixou de ser mestre.`;
-  if (next.fullState) {
-    next.fullState.masterName = null;
-  }
-  return next;
-}
-
-function handle_publish_state_post(state: TransportState, post: Extract<NetPost, { $: "publish_state" }>): TransportState {
-  if (transport_controller_name(state) !== post.name || !is_current_session(state, post.name, post.sessionId)) {
-    return state;
-  }
-
-  const next = clone_state(state);
-  next.fullState = clone_state(post.fullState);
-  next.publicState = clone_state(post.publicState);
-  next.phase = post.fullState.phase;
-  next.masterName = post.fullState.masterName ?? next.masterName;
-  next.message = null;
-
-  const consumed = new Set(next.consumedActionIds);
-  for (const actionId of post.consumedActionIds) {
-    consumed.add(actionId);
-  }
-  next.consumedActionIds = [...consumed].slice(-256);
-  next.actionRequests = next.actionRequests.filter((action) => !consumed.has(action.id));
-
-  if (next.phase === "lobby") {
-    next.actionRequests = [];
-    next.consumedActionIds = [];
-  }
-
-  for (const fullPlayer of Object.values(next.fullState.players)) {
-    const rosterPlayer = next.roster[fullPlayer.name] ?? {
-      name: fullPlayer.name,
-      color: fullPlayer.color,
-      joinedAt: fullPlayer.joinedAt,
-      seat: fullPlayer.seat,
-      activeSessionId: null,
-      lastSeenTick: -99999,
-    };
-
-    rosterPlayer.color = fullPlayer.color;
-    rosterPlayer.joinedAt = fullPlayer.joinedAt;
-    rosterPlayer.seat = fullPlayer.seat;
-    next.roster[fullPlayer.name] = rosterPlayer;
-  }
-
-  return next;
-}
-
-function handle_action_request_post(
-  state: TransportState,
-  action: ActionRequest,
-  actorName: string,
-  sessionId: string,
-): TransportState {
-  if (state.phase !== "running" || !is_current_session(state, actorName, sessionId)) {
-    return state;
-  }
-
-  if (actorName !== action.actorName && transport_controller_name(state) !== actorName) {
-    return state;
-  }
-
-  if (state.actionRequests.some((item) => item.id === action.id) || state.consumedActionIds.includes(action.id)) {
-    return state;
-  }
-
-  const next = clone_state(state);
-  next.actionRequests.push(action);
-  return next;
-}
-
-function is_current_session(state: TransportState, name: string, sessionId: string): boolean {
-  return state.roster[name]?.activeSessionId === sessionId;
-}
-
-function is_transport_player_connected(state: TransportState, player: TransportPlayer): boolean {
-  if (!player.activeSessionId) {
-    return false;
-  }
-  return state.clockTick - player.lastSeenTick <= HEARTBEAT_GRACE_TICKS;
-}
-
-function transport_controller_name(state: TransportState): string | null {
-  if (state.masterName) {
-    const master = state.roster[state.masterName];
-    if (master && is_transport_player_connected(state, master)) {
-      return state.masterName;
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const index = row * 3 + col + 1;
+      const id = room_id(index);
+      rooms[id] = create_room(id, 180 + col * DEFAULT_ROOM_SIZE, 160 + row * DEFAULT_ROOM_SIZE);
     }
   }
 
-  const fallback = Object.values(state.roster)
-    .filter((player) => player.seat === "participant" && is_transport_player_connected(state, player))
-    .sort((left, right) => left.joinedAt - right.joinedAt)[0];
+  const defaultPairs: Array<[string, string]> = [
+    [room_id(1), room_id(2)],
+    [room_id(2), room_id(3)],
+    [room_id(4), room_id(5)],
+    [room_id(5), room_id(6)],
+    [room_id(7), room_id(8)],
+    [room_id(8), room_id(9)],
+    [room_id(1), room_id(4)],
+    [room_id(4), room_id(7)],
+    [room_id(2), room_id(5)],
+    [room_id(5), room_id(8)],
+    [room_id(3), room_id(6)],
+    [room_id(6), room_id(9)],
+    [room_id(1), room_id(5)],
+    [room_id(5), room_id(9)],
+  ];
 
-  return fallback?.name ?? null;
+  for (const [left, right] of defaultPairs) {
+    const corridor = make_corridor(rooms[left], rooms[right]);
+    corridors[corridor.id] = corridor;
+  }
+
+  return { rooms, corridors };
+}
+
+export function create_empty_state(masterName: string | null = null): FullGameState {
+  const { rooms, corridors } = create_default_maze();
+  return {
+    phase: "lobby",
+    masterName,
+    foxName: null,
+    round: 0,
+    currentTurnName: null,
+    players: {},
+    rooms,
+    corridors,
+    henOrder: [],
+    pendingKillTargets: [],
+    feed: [],
+  };
+}
+
+export function apply_map_edit(state: FullGameState, action: MapEditAction): FullGameState {
+  const next = clone_state(state);
+
+  switch (action.type) {
+    case "add_room": {
+      const ids = Object.keys(next.rooms).map((id) => Number(id.split("-")[1] ?? 0));
+      const newId = room_id((Math.max(0, ...ids) || 0) + 1);
+      next.rooms[newId] = create_room(newId, 320, 320, "normal");
+      return next;
+    }
+    case "set_default_map": {
+      const maze = create_default_maze();
+      next.rooms = maze.rooms;
+      next.corridors = maze.corridors;
+      for (const player of Object.values(next.players)) {
+        player.locationRoomId = null;
+      }
+      return next;
+    }
+    case "set_random_map":
+      apply_random_map(next, action.seed);
+      return next;
+    case "toggle_corridor": {
+      const [a, b] = normalized_id_pair(action.leftRoomId, action.rightRoomId);
+      const id = corridor_id(a, b);
+      if (next.corridors[id]) {
+        delete next.corridors[id];
+        return next;
+      }
+      const left = next.rooms[action.leftRoomId];
+      const right = next.rooms[action.rightRoomId];
+      if (!left || !right) {
+        return state;
+      }
+      next.corridors[id] = make_corridor(left, right);
+      return next;
+    }
+    case "cycle_room_type": {
+      const room = next.rooms[action.roomId];
+      if (!room) {
+        return state;
+      }
+      room.type = room.type === "normal" ? "shop" : "normal";
+      return next;
+    }
+    case "remove_room": {
+      delete next.rooms[action.roomId];
+      for (const corridorId of Object.keys(next.corridors)) {
+        const corridor = next.corridors[corridorId];
+        if (corridor.fromRoomId === action.roomId || corridor.toRoomId === action.roomId) {
+          delete next.corridors[corridorId];
+        }
+      }
+      for (const player of Object.values(next.players)) {
+        if (player.locationRoomId === action.roomId) {
+          player.locationRoomId = null;
+        }
+      }
+      return next;
+    }
+    case "toggle_loop": {
+      const id = corridor_id(action.roomId, action.roomId);
+      if (next.corridors[id]) {
+        delete next.corridors[id];
+        return next;
+      }
+      next.corridors[id] = {
+        id,
+        fromRoomId: action.roomId,
+        toRoomId: action.roomId,
+        angleFrom: 0,
+        angleTo: 0,
+      };
+      return next;
+    }
+    case "move_room": {
+      const room = next.rooms[action.roomId];
+      if (!room) {
+        return state;
+      }
+      room.x = action.x;
+      room.y = action.y;
+      for (const corridor of Object.values(next.corridors)) {
+        if (corridor.fromRoomId === action.roomId || corridor.toRoomId === action.roomId) {
+          const fromRoom = next.rooms[corridor.fromRoomId];
+          const toRoom = next.rooms[corridor.toRoomId];
+          if (!fromRoom || !toRoom) {
+            continue;
+          }
+          corridor.angleFrom = compute_angle(fromRoom, toRoom);
+          corridor.angleTo = compute_angle(toRoom, fromRoom);
+        }
+      }
+      return next;
+    }
+    default:
+      return next;
+  }
+}
+
+function pick_extreme_wrap_pairs(rooms: Record<string, MazeRoom>): Array<[string, string]> {
+  const roomList = Object.values(rooms);
+  if (roomList.length < 2) {
+    return [];
+  }
+
+  const centerX = roomList.reduce((sum, room) => sum + room.x, 0) / roomList.length;
+  const centerY = roomList.reduce((sum, room) => sum + room.y, 0) / roomList.length;
+
+  const leftRoom = pick_extreme_room(roomList, "x", 1, centerY, "y");
+  const rightRoom = pick_extreme_room(roomList, "x", -1, centerY, "y");
+  const topRoom = pick_extreme_room(roomList, "y", 1, centerX, "x");
+  const bottomRoom = pick_extreme_room(roomList, "y", -1, centerX, "x");
+
+  const pairs: Array<[string, string]> = [];
+  if (leftRoom && rightRoom && leftRoom.id !== rightRoom.id) {
+    pairs.push([leftRoom.id, rightRoom.id]);
+  }
+  if (topRoom && bottomRoom && topRoom.id !== bottomRoom.id) {
+    pairs.push([topRoom.id, bottomRoom.id]);
+  }
+  return pairs;
+}
+
+function edge_graph(rooms: Record<string, MazeRoom>): Map<string, Array<[string, string]>> {
+  const graph = new Map<string, Array<[string, string]>>();
+  const candidatePairs = [
+    ...RANDOM_MAZE_EDGE_PAIRS.map(([left, right]) => [room_id(left), room_id(right)] as [string, string]),
+    ...pick_extreme_wrap_pairs(rooms),
+  ];
+
+  for (const [leftId, rightId] of candidatePairs) {
+    graph.set(leftId, [...(graph.get(leftId) ?? []), [leftId, rightId]]);
+    graph.set(rightId, [...(graph.get(rightId) ?? []), [rightId, leftId]]);
+  }
+
+  return graph;
 }
 
 function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridors"> {
@@ -369,10 +728,7 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
     }
   }
 
-  const extraEdges = shuffle_pairs(
-    graph_edges(graph),
-    rng,
-  );
+  const extraEdges = shuffle_with_rng(graph_edges(graph), rng);
   const extraCount = 3 + Math.floor(rng() * 5);
   for (const [left, right] of extraEdges) {
     if (Object.keys(corridors).length >= roomIds.length - 1 + extraCount) {
@@ -383,9 +739,9 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
   }
 
   const shopCount = 1 + Math.floor(rng() * 3);
-  const shuffledRooms = shuffle_pairs(roomIds.map((id) => [id, id] as [string, string]), rng);
+  const shuffledRooms = shuffle_with_rng(roomIds, rng);
   for (let index = 0; index < shopCount; index += 1) {
-    const roomName = shuffledRooms[index]?.[0];
+    const roomName = shuffledRooms[index];
     if (roomName) {
       rooms[roomName].type = "shop";
     }
@@ -393,7 +749,7 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
 
   const loopCount = Math.floor(rng() * 2);
   for (let index = 0; index < loopCount; index += 1) {
-    const roomName = shuffledRooms[shopCount + index]?.[0];
+    const roomName = shuffledRooms[shopCount + index];
     if (!roomName) {
       continue;
     }
@@ -407,445 +763,303 @@ function build_saved_maze(seed: number): Pick<FullGameState, "rooms" | "corridor
     };
   }
 
-  return {
-    rooms,
-    corridors,
-  };
-}
-
-function pick_extreme_room(
-  rooms: MazeRoom[],
-  axis: "x" | "y",
-  direction: 1 | -1,
-  preferredCenter: number,
-  tieAxis: "x" | "y",
-): MazeRoom | null {
-  if (rooms.length === 0) {
-    return null;
-  }
-
-  const ordered = [...rooms].sort((left, right) => {
-    const primaryDelta = direction * (left[axis] - right[axis]);
-    if (primaryDelta !== 0) {
-      return primaryDelta;
-    }
-    return Math.abs(left[tieAxis] - preferredCenter) - Math.abs(right[tieAxis] - preferredCenter);
-  });
-
-  return ordered[0] ?? null;
-}
-
-function edge_graph(rooms: Record<string, MazeRoom>): Map<string, Array<[string, string]>> {
-  const graph = new Map<string, Array<[string, string]>>();
-  const candidatePairs = [
-    ...RANDOM_MAZE_EDGE_PAIRS.map(([left, right]) => [room_id(left), room_id(right)] as [string, string]),
-    ...extreme_wrap_pairs(rooms),
-  ];
-
-  for (const [leftId, rightId] of candidatePairs) {
-    graph.set(leftId, [...(graph.get(leftId) ?? []), [leftId, rightId]]);
-    graph.set(rightId, [...(graph.get(rightId) ?? []), [rightId, leftId]]);
-  }
-  return graph;
-}
-
-function extreme_wrap_pairs(rooms: Record<string, MazeRoom>): Array<[string, string]> {
-  const roomList = Object.values(rooms);
-  if (roomList.length < 2) {
-    return [];
-  }
-
-  const centerX = roomList.reduce((sum, room) => sum + room.x, 0) / roomList.length;
-  const centerY = roomList.reduce((sum, room) => sum + room.y, 0) / roomList.length;
-
-  const leftRoom = pick_extreme_room(roomList, "x", 1, centerY, "y");
-  const rightRoom = pick_extreme_room(roomList, "x", -1, centerY, "y");
-  const topRoom = pick_extreme_room(roomList, "y", 1, centerX, "x");
-  const bottomRoom = pick_extreme_room(roomList, "y", -1, centerX, "x");
-
-  const pairs: Array<[string, string]> = [];
-  if (leftRoom && rightRoom && leftRoom.id !== rightRoom.id) {
-    pairs.push([leftRoom.id, rightRoom.id]);
-  }
-  if (topRoom && bottomRoom && topRoom.id !== bottomRoom.id) {
-    pairs.push([topRoom.id, bottomRoom.id]);
-  }
-  return pairs;
-}
-
-function graph_edges(graph: Map<string, Array<[string, string]>>): Array<[string, string]> {
-  const seen = new Set<string>();
-  const edges: Array<[string, string]> = [];
-
-  for (const entries of graph.values()) {
-    for (const [left, right] of entries) {
-      const [a, b] = normalized_id_pair(left, right);
-      const key = `${a}:${b}`;
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      edges.push([a, b]);
-    }
-  }
-
-  return edges;
-}
-
-function shuffle_pairs<T>(items: T[], rng: () => number): T[] {
-  const next = [...items];
-  for (let index = next.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(rng() * (index + 1));
-    const current = next[index];
-    next[index] = next[swapIndex] as T;
-    next[swapIndex] = current as T;
-  }
-  return next;
-}
-
-function seeded_rng(seed: number): () => number {
-  let value = seed >>> 0;
-  return () => {
-    value = (value * 1664525 + 1013904223) >>> 0;
-    return value / 4294967296;
-  };
-}
-
-export function compute_angle(from: MazeRoom, to: MazeRoom): number {
-  const radians = Math.atan2(to.y - from.y, to.x - from.x);
-  return Math.round((((radians * 180) / Math.PI) + 360) % 360);
-}
-
-export function create_room(id: string, x: number, y: number, type: RoomType = "normal"): MazeRoom {
-  return { id, x, y, type };
-}
-
-export function create_default_maze(): Pick<FullGameState, "rooms" | "corridors"> {
-  const rooms: Record<string, MazeRoom> = {};
-  const corridors: Record<string, Corridor> = {};
-
-  for (let row = 0; row < 3; row += 1) {
-    for (let col = 0; col < 3; col += 1) {
-      const index = row * 3 + col + 1;
-      const id = room_id(index);
-      rooms[id] = create_room(id, 180 + col * DEFAULT_ROOM_SIZE, 160 + row * DEFAULT_ROOM_SIZE);
-    }
-  }
-
-  const orthogonal_pairs: Array<[string, string]> = [
-    [room_id(1), room_id(2)],
-    [room_id(2), room_id(3)],
-    [room_id(4), room_id(5)],
-    [room_id(5), room_id(6)],
-    [room_id(7), room_id(8)],
-    [room_id(8), room_id(9)],
-    [room_id(1), room_id(4)],
-    [room_id(4), room_id(7)],
-    [room_id(2), room_id(5)],
-    [room_id(5), room_id(8)],
-    [room_id(3), room_id(6)],
-    [room_id(6), room_id(9)],
-    [room_id(1), room_id(5)],
-    [room_id(5), room_id(9)],
-  ];
-
-  for (const [left, right] of orthogonal_pairs) {
-    const corridor = make_corridor(rooms[left], rooms[right]);
-    corridors[corridor.id] = corridor;
-  }
-
   return { rooms, corridors };
 }
 
-export function create_empty_state(room: string, roster: Presence[], masterName: string | null): FullGameState {
-  const { rooms, corridors } = create_default_maze();
-  const players: Record<string, FullPlayerState> = {};
+export function create_transport_state(): TransportState {
+  return {
+    roster: {},
+    fullState: create_empty_state(),
+    clockTick: 0,
+    nextJoinOrder: 0,
+  };
+}
 
-  for (const presence of roster) {
-    players[presence.name] = {
-      name: presence.name,
-      color: presence.color,
-      joinedAt: presence.joinedAt,
-      seat: presence.seat,
-      role: presence.isMaster ? "master" : presence.seat === "spectator" ? "spectator" : "player",
-      alive: false,
-      locationRoomId: null,
-      hasFullInfo: presence.isMaster || presence.seat === "spectator",
-    };
+export function tick_transport_state(state: TransportState): TransportState {
+  return {
+    ...state,
+    clockTick: state.clockTick + 1,
+  };
+}
+
+function handle_join_post(state: TransportState, post: Extract<NetPost, { $: "join_room" }>): TransportState {
+  const next = clone_state(state);
+  const existing = next.roster[post.name];
+
+  if (existing) {
+    existing.activeSessionId = post.sessionId;
+    existing.lastSeenTick = next.clockTick;
+    return next;
   }
 
+  const joinedAt = next.nextJoinOrder + 1;
+  const seat = next.fullState.phase === "lobby" ? "participant" : "spectator";
+  const player: TransportPlayer = {
+    name: post.name,
+    color: PRESENCE_COLORS[next.nextJoinOrder % PRESENCE_COLORS.length] ?? PRESENCE_COLORS[0],
+    joinedAt,
+    seat,
+    activeSessionId: post.sessionId,
+    lastSeenTick: next.clockTick,
+  };
+
+  next.nextJoinOrder += 1;
+  next.roster[player.name] = player;
+  sync_full_player(next, player);
+  if (next.fullState.phase === "lobby") {
+    sync_lobby_roles(next.fullState);
+  } else {
+    append_system_entry(next.fullState, post.name, `${post.name} entrou como espectador.`);
+  }
+  return next;
+}
+
+function handle_heartbeat_post(state: TransportState, post: Extract<NetPost, { $: "heartbeat" }>): TransportState {
+  if (!is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const next = clone_state(state);
+  const player = next.roster[post.name];
+  if (!player) {
+    return state;
+  }
+  player.lastSeenTick = next.clockTick;
+  return next;
+}
+
+function handle_claim_master_post(state: TransportState, post: Extract<NetPost, { $: "claim_master" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || state.fullState.masterName || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const player = state.fullState.players[post.name];
+  if (!player || player.seat !== "participant") {
+    return state;
+  }
+  const next = clone_state(state);
+  next.fullState.masterName = post.name;
+  sync_lobby_roles(next.fullState);
+  append_system_entry(next.fullState, post.name, `${post.name} virou mestre.`);
+  return next;
+}
+
+function handle_unclaim_master_post(state: TransportState, post: Extract<NetPost, { $: "unclaim_master" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || state.fullState.masterName !== post.name || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const next = clone_state(state);
+  next.fullState.masterName = null;
+  sync_lobby_roles(next.fullState);
+  append_system_entry(next.fullState, post.name, `${post.name} deixou de ser mestre.`);
+  return next;
+}
+
+function handle_toggle_ready_post(state: TransportState, post: Extract<NetPost, { $: "toggle_ready" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const player = state.fullState.players[post.name];
+  if (!player || player.seat !== "participant") {
+    return state;
+  }
+  const next = clone_state(state);
+  next.fullState.players[post.name].ready = !next.fullState.players[post.name].ready;
+  append_system_entry(
+    next.fullState,
+    post.name,
+    next.fullState.players[post.name].ready ? `${post.name} ficou ready.` : `${post.name} removeu o ready.`,
+  );
+  if (should_auto_start(next)) {
+    return start_game_with_seed(next, auto_start_seed(next, post.name), "Todos ficaram ready. Partida iniciada.");
+  }
+  return next;
+}
+
+function handle_random_map_post(state: TransportState, post: Extract<NetPost, { $: "set_random_map" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const player = state.fullState.players[post.name];
+  if (!player || player.seat !== "participant") {
+    return state;
+  }
+  const next = clone_state(state);
+  apply_random_map(next.fullState, post.seed);
+  append_system_entry(next.fullState, post.name, `${post.name} aplicou um mapa aleatorio.`);
+  return next;
+}
+
+function handle_set_random_fox_post(state: TransportState, post: Extract<NetPost, { $: "set_random_fox" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const actor = state.fullState.players[post.name];
+  if (!actor || actor.seat !== "participant") {
+    return state;
+  }
+  const next = clone_state(state);
+  set_selected_fox(next.fullState, post.foxName);
+  if (next.fullState.foxName) {
+    append_system_entry(next.fullState, post.name, `${next.fullState.foxName} virou a raposa.`);
+  } else {
+    append_system_entry(next.fullState, post.name, "A raposa foi removida.");
+  }
+  return next;
+}
+
+function handle_toggle_self_fox_post(state: TransportState, post: Extract<NetPost, { $: "toggle_self_fox" }>): TransportState {
+  if (state.fullState.phase !== "lobby" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const player = state.fullState.players[post.name];
+  if (!player || player.seat !== "participant" || player.role === "master") {
+    return state;
+  }
+  const next = clone_state(state);
+  const nextFox = next.fullState.foxName === post.name ? null : post.name;
+  set_selected_fox(next.fullState, nextFox);
+  append_system_entry(
+    next.fullState,
+    post.name,
+    nextFox ? `${post.name} virou a raposa.` : `${post.name} deixou de ser raposa.`,
+  );
+  return next;
+}
+
+function handle_start_game_post(state: TransportState, post: Extract<NetPost, { $: "start_game" }>): TransportState {
+  if (
+    state.fullState.phase !== "lobby" ||
+    state.fullState.masterName !== post.name ||
+    !is_current_session(state, post.name, post.sessionId)
+  ) {
+    return state;
+  }
+  return start_game_with_seed(state, post.seed, `${post.name} iniciou a partida.`);
+}
+
+function handle_chat_post(state: TransportState, post: Extract<NetPost, { $: "lobby_chat_message" }>): TransportState {
+  if (!is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  const text = post.text.trim().slice(0, 280);
+  if (!text) {
+    return state;
+  }
+  const next = clone_state(state);
+  append_chat_entry(next.fullState, post.name, text);
+  return next;
+}
+
+function handle_map_edit_post(state: TransportState, post: Extract<NetPost, { $: "map_edit" }>): TransportState {
+  if (
+    state.fullState.phase !== "lobby" ||
+    state.fullState.masterName !== post.name ||
+    !is_current_session(state, post.name, post.sessionId)
+  ) {
+    return state;
+  }
+  const next = clone_state(state);
+  next.fullState = apply_map_edit(next.fullState, post.action);
+  append_system_entry(next.fullState, post.name, "Mapa atualizado pelo mestre.");
+  return next;
+}
+
+function handle_move_post(state: TransportState, post: Extract<NetPost, { $: "submit_move" }>): TransportState {
+  if (state.fullState.phase !== "running" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  if (!can_post_as_actor(state, post.name, post.actorName)) {
+    return state;
+  }
+  return apply_move(state, post.actorName, post.corridorId);
+}
+
+function handle_kill_post(state: TransportState, post: Extract<NetPost, { $: "select_kill_target" }>): TransportState {
+  if (state.fullState.phase !== "running" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  if (!can_post_as_actor(state, post.name, post.actorName)) {
+    return state;
+  }
+  return apply_kill_choice(state, post.actorName, post.targetName);
+}
+
+function handle_return_to_lobby_post(state: TransportState, post: Extract<NetPost, { $: "return_to_lobby" }>): TransportState {
+  if (state.fullState.phase !== "game_over" || !is_current_session(state, post.name, post.sessionId)) {
+    return state;
+  }
+  return reset_to_lobby_state(state, post.name, `${post.name} voltou a sala para o lobby.`);
+}
+
+export function apply_transport_post(raw: string, state: TransportState): TransportState {
+  let post: NetPost;
+  try {
+    post = JSON.parse(raw) as NetPost;
+  } catch {
+    return state;
+  }
+
+  switch (post.$) {
+    case "join_room":
+      return handle_join_post(state, post);
+    case "heartbeat":
+      return handle_heartbeat_post(state, post);
+    case "claim_master":
+      return handle_claim_master_post(state, post);
+    case "unclaim_master":
+      return handle_unclaim_master_post(state, post);
+    case "toggle_ready":
+      return handle_toggle_ready_post(state, post);
+    case "set_random_map":
+      return handle_random_map_post(state, post);
+    case "set_random_fox":
+      return handle_set_random_fox_post(state, post);
+    case "toggle_self_fox":
+      return handle_toggle_self_fox_post(state, post);
+    case "start_game":
+      return handle_start_game_post(state, post);
+    case "lobby_chat_message":
+      return handle_chat_post(state, post);
+    case "map_edit":
+      return handle_map_edit_post(state, post);
+    case "submit_move":
+      return handle_move_post(state, post);
+    case "select_kill_target":
+      return handle_kill_post(state, post);
+    case "return_to_lobby":
+      return handle_return_to_lobby_post(state, post);
+    default:
+      return state;
+  }
+}
+
+function build_lobby_state(players: Presence[], fullState: FullGameState): LobbyState {
+  const connectedParticipants = connected_lobby_players(players);
+  const participantCount = players.filter((player) => player.seat === "participant").length;
   return {
-    phase: "lobby",
-    masterName,
-    foxName: null,
-    foxCandidateName: null,
-    round: 0,
-    currentTurnName: null,
+    readyCount: connectedParticipants.filter((player) => player.ready).length,
+    connectedParticipantCount: connectedParticipants.length,
+    totalParticipantCount: participantCount,
+    allConnectedReady: connectedParticipants.length >= 2 && connectedParticipants.every((player) => player.ready),
+    foxName: fullState.foxName,
+  };
+}
+
+export function derive_room_sync(room: string, selfName: string, state: TransportState): RoomSync {
+  const players = roster_list(state);
+  return {
+    room,
+    selfName,
+    phase: state.fullState.phase,
+    masterName: state.fullState.masterName,
     players,
-    rooms,
-    corridors,
-    henOrder: [],
-    pendingKillTargets: [],
+    lobbyState: state.fullState.phase === "lobby" ? build_lobby_state(players, state.fullState) : null,
+    publicState: state.fullState.phase === "lobby" ? null : build_public_state(state.fullState, players),
+    fullState: clone_state(state.fullState),
+    feed: [...state.fullState.feed],
   };
 }
 
-export function sync_state_players(state: FullGameState, roster: Presence[], masterName: string | null): FullGameState {
-  const next = clone_state(state);
-  next.masterName = masterName;
-
-  for (const presence of roster) {
-    const existing = next.players[presence.name];
-    const baseRole: PlayerRole = presence.isMaster
-      ? "master"
-      : presence.seat === "spectator"
-        ? "spectator"
-        : existing?.role && existing.role !== "spectator"
-          ? existing.role
-          : "player";
-
-    next.players[presence.name] = {
-      name: presence.name,
-      color: presence.color,
-      joinedAt: presence.joinedAt,
-      seat: presence.seat,
-      role: baseRole,
-      alive: existing?.alive ?? false,
-      locationRoomId: existing?.locationRoomId ?? null,
-      hasFullInfo:
-        presence.isMaster ||
-        presence.seat === "spectator" ||
-        existing?.hasFullInfo === true,
-    };
-  }
-
-  for (const name of Object.keys(next.players)) {
-    if (!roster.find((presence) => presence.name === name)) {
-      next.players[name].seat = "participant";
-    }
-  }
-
-  if (masterName) {
-    for (const player of Object.values(next.players)) {
-      if (player.name === masterName) {
-        player.role = "master";
-        player.hasFullInfo = true;
-        player.alive = false;
-        player.locationRoomId = null;
-      }
-    }
-  }
-
-  return next;
-}
-
-export function make_corridor(fromRoom: MazeRoom, toRoom: MazeRoom): Corridor {
-  const fromAngle = compute_angle(fromRoom, toRoom);
-  const toAngle = compute_angle(toRoom, fromRoom);
-  return {
-    id: corridor_id(fromRoom.id, toRoom.id),
-    fromRoomId: fromRoom.id,
-    toRoomId: toRoom.id,
-    angleFrom: fromAngle,
-    angleTo: toAngle,
-  };
-}
-
-export function toggle_corridor(state: FullGameState, leftRoomId: string, rightRoomId: string): FullGameState {
-  const next = clone_state(state);
-  const [a, b] = normalized_id_pair(leftRoomId, rightRoomId);
-  const id = corridor_id(a, b);
-  if (next.corridors[id]) {
-    delete next.corridors[id];
-    return next;
-  }
-  const left = next.rooms[leftRoomId];
-  const right = next.rooms[rightRoomId];
-  if (!left || !right) {
-    return state;
-  }
-  next.corridors[id] = make_corridor(left, right);
-  return next;
-}
-
-export function add_room(state: FullGameState): FullGameState {
-  const next = clone_state(state);
-  const ids = Object.keys(next.rooms).map((id) => Number(id.split("-")[1] ?? 0));
-  const newId = room_id((Math.max(0, ...ids) || 0) + 1);
-  next.rooms[newId] = create_room(newId, 320, 320, "normal");
-  return next;
-}
-
-export function remove_room(state: FullGameState, roomId: string): FullGameState {
-  const next = clone_state(state);
-  delete next.rooms[roomId];
-  for (const corridorId of Object.keys(next.corridors)) {
-    const corridor = next.corridors[corridorId];
-    if (corridor.fromRoomId === roomId || corridor.toRoomId === roomId) {
-      delete next.corridors[corridorId];
-    }
-  }
-  for (const player of Object.values(next.players)) {
-    if (player.locationRoomId === roomId) {
-      player.locationRoomId = null;
-    }
-  }
-  return next;
-}
-
-export function move_room(state: FullGameState, roomId: string, x: number, y: number): FullGameState {
-  const next = clone_state(state);
-  const room = next.rooms[roomId];
-  if (!room) {
-    return state;
-  }
-  room.x = x;
-  room.y = y;
-  for (const corridor of Object.values(next.corridors)) {
-    if (corridor.fromRoomId === roomId || corridor.toRoomId === roomId) {
-      const fromRoom = next.rooms[corridor.fromRoomId];
-      const toRoom = next.rooms[corridor.toRoomId];
-      corridor.angleFrom = compute_angle(fromRoom, toRoom);
-      corridor.angleTo = compute_angle(toRoom, fromRoom);
-    }
-  }
-  return next;
-}
-
-export function cycle_room_type(state: FullGameState, roomId: string): FullGameState {
-  const next = clone_state(state);
-  const room = next.rooms[roomId];
-  if (!room) {
-    return state;
-  }
-  room.type = room.type === "normal" ? "shop" : "normal";
-  return next;
-}
-
-export function add_self_loop(state: FullGameState, roomId: string): FullGameState {
-  const next = clone_state(state);
-  const id = corridor_id(roomId, roomId);
-  if (next.corridors[id]) {
-    delete next.corridors[id];
-    return next;
-  }
-  next.corridors[id] = {
-    id,
-    fromRoomId: roomId,
-    toRoomId: roomId,
-    angleFrom: 0,
-    angleTo: 0,
-  };
-  return next;
-}
-
-export function choose_random_fox(state: FullGameState): FullGameState {
-  const next = clone_state(state);
-  const candidates = Object.values(next.players)
-    .filter((player) => player.seat === "participant" && player.role !== "master")
-    .sort((left, right) => left.joinedAt - right.joinedAt);
-
-  if (candidates.length === 0) {
-    next.foxCandidateName = null;
-    return next;
-  }
-
-  const index = Math.floor(Math.random() * candidates.length);
-  next.foxCandidateName = candidates[index]?.name ?? null;
-  return next;
-}
-
-export function choose_fox(state: FullGameState, foxName: string): FullGameState {
-  const next = clone_state(state);
-  next.foxCandidateName = foxName;
-  return next;
-}
-
-export function start_game(state: FullGameState, roster: Presence[]): FullGameState | null {
-  const next = sync_state_players(state, roster, state.masterName);
-  const active = roster
-    .filter((presence) => presence.seat === "participant" && !presence.isMaster && presence.connected)
-    .sort((left, right) => left.joinedAt - right.joinedAt);
-
-  if (active.length < 2 || active.length > 8) {
-    return null;
-  }
-
-  const foxName = next.foxCandidateName && active.find((presence) => presence.name === next.foxCandidateName)
-    ? next.foxCandidateName
-    : active[Math.floor(Math.random() * active.length)]?.name ?? null;
-
-  if (!foxName) {
-    return null;
-  }
-
-  const roomIds = Object.keys(next.rooms);
-  if (roomIds.length === 0) {
-    return null;
-  }
-
-  const shuffledRooms = [...roomIds].sort(() => Math.random() - 0.5);
-  const henOrder = active.filter((presence) => presence.name !== foxName).map((presence) => presence.name);
-
-  active.forEach((presence, index) => {
-    const player = next.players[presence.name];
-    player.alive = true;
-    player.locationRoomId = shuffledRooms[index % shuffledRooms.length] ?? roomIds[0] ?? null;
-    player.role = presence.name === foxName ? "fox" : "hen";
-    player.hasFullInfo = false;
-  });
-
-  for (const player of Object.values(next.players)) {
-    if (player.role === "spectator") {
-      player.alive = false;
-      player.hasFullInfo = true;
-      player.locationRoomId = null;
-    }
-    if (player.role === "master") {
-      player.hasFullInfo = true;
-      player.alive = false;
-      player.locationRoomId = null;
-    }
-  }
-
-  next.phase = "running";
-  next.round = 1;
-  next.foxName = foxName;
-  next.pendingKillTargets = [];
-  next.henOrder = henOrder;
-  next.currentTurnName = henOrder[0] ?? foxName;
-  return next;
-}
-
-export function reset_to_lobby(state: FullGameState, roster: Presence[]): FullGameState {
-  const next = sync_state_players(state, roster, state.masterName);
-  next.phase = "lobby";
-  next.foxName = null;
-  next.foxCandidateName = null;
-  next.round = 0;
-  next.currentTurnName = null;
-  next.pendingKillTargets = [];
-  next.henOrder = [];
-
-  for (const player of Object.values(next.players)) {
-    if (player.role !== "master" && player.seat === "participant") {
-      player.role = "player";
-      player.alive = false;
-      player.locationRoomId = null;
-      player.hasFullInfo = false;
-    } else if (player.seat === "spectator") {
-      player.role = "spectator";
-      player.alive = false;
-      player.locationRoomId = null;
-      player.hasFullInfo = true;
-    }
-  }
-  return next;
-}
-
-export function build_public_state(
-  state: FullGameState,
-  roster: Presence[],
-): PublicState {
+export function build_public_state(state: FullGameState, roster: Presence[]): PublicState {
   const screens: PublicState["screens"] = {};
   const watchOrder = Object.values(state.players)
     .filter((player) => player.role === "hen" || player.role === "fox")
@@ -922,22 +1136,23 @@ export function exits_for_room(state: FullGameState, roomId: string): ExitInfo[]
     .sort((left, right) => left.angle - right.angle);
 }
 
-export function apply_move(state: FullGameState, actorName: string, corridorId: string | null): FullGameState {
-  if (state.phase !== "running" || state.currentTurnName !== actorName || state.pendingKillTargets.length > 0) {
+export function apply_move(state: TransportState, actorName: string, corridorId: string | null): TransportState {
+  if (state.fullState.phase !== "running" || state.fullState.currentTurnName !== actorName || state.fullState.pendingKillTargets.length > 0) {
     return state;
   }
 
   const next = clone_state(state);
-  const actor = next.players[actorName];
+  const actor = next.fullState.players[actorName];
   if (!actor || !actor.alive) {
     return state;
   }
 
   if (corridorId === null) {
-    return advance_turn(next);
+    next.fullState = advance_turn(next.fullState);
+    return next;
   }
 
-  const corridor = next.corridors[corridorId];
+  const corridor = next.fullState.corridors[corridorId];
   if (!corridor || !actor.locationRoomId) {
     return state;
   }
@@ -953,84 +1168,33 @@ export function apply_move(state: FullGameState, actorName: string, corridorId: 
   }
 
   if (actor.role === "fox") {
-    const targets = living_hens_in_room(next, actor.locationRoomId);
+    const targets = living_hens_in_room(next.fullState, actor.locationRoomId);
     if (targets.length === 0) {
-      return advance_turn(next);
+      next.fullState = advance_turn(next.fullState);
+      return next;
     }
     if (targets.length === 1) {
-      return eliminate_hen(next, targets[0] ?? "");
+      next.fullState = eliminate_hen(next.fullState, targets[0] ?? "");
+      return next;
     }
-    next.pendingKillTargets = targets;
+    next.fullState.pendingKillTargets = targets;
     return next;
   }
 
-  return advance_turn(next);
+  next.fullState = advance_turn(next.fullState);
+  return next;
 }
 
-export function apply_kill_choice(state: FullGameState, actorName: string, targetName: string): FullGameState {
-  if (state.phase !== "running" || state.currentTurnName !== actorName || state.pendingKillTargets.length === 0) {
+export function apply_kill_choice(state: TransportState, actorName: string, targetName: string): TransportState {
+  if (state.fullState.phase !== "running" || state.fullState.currentTurnName !== actorName || state.fullState.pendingKillTargets.length === 0) {
     return state;
   }
 
-  if (!state.pendingKillTargets.includes(targetName)) {
+  if (!state.fullState.pendingKillTargets.includes(targetName)) {
     return state;
   }
 
   const next = clone_state(state);
-  return eliminate_hen(next, targetName);
-}
-
-function eliminate_hen(state: FullGameState, targetName: string): FullGameState {
-  const target = state.players[targetName];
-  if (!target) {
-    return state;
-  }
-  target.alive = false;
-  target.hasFullInfo = true;
-  state.pendingKillTargets = [];
-
-  const anyHenAlive = Object.values(state.players).some((player) => player.role === "hen" && player.alive);
-  if (!anyHenAlive) {
-    state.phase = "game_over";
-    state.currentTurnName = null;
-    return state;
-  }
-
-  return advance_turn(state);
-}
-
-function living_hens_in_room(state: FullGameState, roomId: string | null): string[] {
-  if (!roomId) {
-    return [];
-  }
-  return Object.values(state.players)
-    .filter((player) => player.role === "hen" && player.alive && player.locationRoomId === roomId)
-    .map((player) => player.name);
-}
-
-function advance_turn(state: FullGameState): FullGameState {
-  const livingHens = state.henOrder.filter((name) => state.players[name]?.alive);
-  const order = [
-    ...livingHens,
-    ...(state.foxName && state.players[state.foxName]?.alive ? [state.foxName] : []),
-  ];
-
-  if (order.length === 0) {
-    state.phase = "game_over";
-    state.currentTurnName = null;
-    return state;
-  }
-
-  const currentIndex = state.currentTurnName ? order.indexOf(state.currentTurnName) : -1;
-  const nextIndex = currentIndex + 1;
-
-  if (currentIndex === -1 || nextIndex >= order.length) {
-    state.round = Math.max(1, state.round) + (currentIndex === -1 ? 0 : 1);
-    state.currentTurnName = order[0] ?? null;
-  } else {
-    state.currentTurnName = order[nextIndex] ?? null;
-  }
-
-  state.pendingKillTargets = [];
-  return state;
+  next.fullState = eliminate_hen(next.fullState, targetName);
+  return next;
 }

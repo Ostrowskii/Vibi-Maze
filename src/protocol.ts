@@ -1,8 +1,9 @@
 export type RoomPhase = "lobby" | "running" | "game_over";
 
 export type RoomType = "normal" | "shop";
-export type PlayerRole = "master" | "fox" | "hen" | "spectator" | "player";
+export type PlayerRole = "master" | "fox" | "hen" | "spectator";
 export type SeatType = "participant" | "spectator";
+export type FeedKind = "chat" | "system";
 
 export type Presence = {
   name: string;
@@ -10,9 +11,9 @@ export type Presence = {
   joinedAt: number;
   connected: boolean;
   seat: SeatType;
-  isMaster: boolean;
   role: PlayerRole;
   alive: boolean;
+  ready: boolean;
 };
 
 export type MazeRoom = {
@@ -30,6 +31,14 @@ export type Corridor = {
   angleTo: number;
 };
 
+export type FeedEntry = {
+  id: string;
+  kind: FeedKind;
+  actorName: string | null;
+  text: string;
+  createdAt: number;
+};
+
 export type FullPlayerState = {
   name: string;
   color: string;
@@ -39,13 +48,13 @@ export type FullPlayerState = {
   alive: boolean;
   locationRoomId: string | null;
   hasFullInfo: boolean;
+  ready: boolean;
 };
 
 export type FullGameState = {
   phase: RoomPhase;
   masterName: string | null;
   foxName: string | null;
-  foxCandidateName: string | null;
   round: number;
   currentTurnName: string | null;
   players: Record<string, FullPlayerState>;
@@ -53,6 +62,7 @@ export type FullGameState = {
   corridors: Record<string, Corridor>;
   henOrder: string[];
   pendingKillTargets: string[];
+  feed: FeedEntry[];
 };
 
 export type PlayerChip = {
@@ -89,9 +99,13 @@ export type PublicState = {
   pendingKillTargets: string[];
 };
 
-export type ActionRequest =
-  | { id: string; type: "move"; actorName: string; corridorId: string | null }
-  | { id: string; type: "kill"; actorName: string; targetName: string };
+export type LobbyState = {
+  readyCount: number;
+  connectedParticipantCount: number;
+  totalParticipantCount: number;
+  allConnectedReady: boolean;
+  foxName: string | null;
+};
 
 export type TransportPlayer = {
   name: string;
@@ -103,14 +117,8 @@ export type TransportPlayer = {
 };
 
 export type TransportState = {
-  phase: RoomPhase;
-  masterName: string | null;
   roster: Record<string, TransportPlayer>;
-  publicState: PublicState | null;
-  fullState: FullGameState | null;
-  actionRequests: ActionRequest[];
-  consumedActionIds: string[];
-  message: string | null;
+  fullState: FullGameState;
   clockTick: number;
   nextJoinOrder: number;
 };
@@ -120,38 +128,40 @@ export type RoomSync = {
   selfName: string;
   phase: RoomPhase;
   masterName: string | null;
-  controllerName: string | null;
   players: Presence[];
+  lobbyState: LobbyState | null;
   publicState: PublicState | null;
-  fullState: FullGameState | null;
-  canClaimMaster: boolean;
-  canBecomeMaster: boolean;
-  swapMode: "none";
-  swapVotes: string[];
-  eligibleNames: string[];
-  message: string | null;
-  pendingActions: ActionRequest[];
+  fullState: FullGameState;
+  feed: FeedEntry[];
 };
+
+export type MapEditAction =
+  | { type: "add_room" }
+  | { type: "set_default_map" }
+  | { type: "set_random_map"; seed: number }
+  | { type: "toggle_corridor"; leftRoomId: string; rightRoomId: string }
+  | { type: "cycle_room_type"; roomId: string }
+  | { type: "remove_room"; roomId: string }
+  | { type: "toggle_loop"; roomId: string }
+  | { type: "move_room"; roomId: string; x: number; y: number };
 
 export type NetPost =
   | { $: "join_room"; name: string; sessionId: string }
   | { $: "heartbeat"; name: string; sessionId: string }
   | { $: "claim_master"; name: string; sessionId: string }
   | { $: "unclaim_master"; name: string; sessionId: string }
-  | {
-      $: "publish_state";
-      name: string;
-      sessionId: string;
-      fullState: FullGameState;
-      publicState: PublicState;
-      consumedActionIds: string[];
-    }
+  | { $: "toggle_ready"; name: string; sessionId: string }
+  | { $: "set_random_map"; name: string; sessionId: string; seed: number }
+  | { $: "set_random_fox"; name: string; sessionId: string; foxName: string | null }
+  | { $: "toggle_self_fox"; name: string; sessionId: string }
+  | { $: "start_game"; name: string; sessionId: string; seed: number }
+  | { $: "lobby_chat_message"; name: string; sessionId: string; text: string }
+  | { $: "map_edit"; name: string; sessionId: string; action: MapEditAction }
   | {
       $: "submit_move";
       name: string;
       sessionId: string;
       actorName: string;
-      requestId: string;
       corridorId: string | null;
     }
   | {
@@ -159,6 +169,6 @@ export type NetPost =
       name: string;
       sessionId: string;
       actorName: string;
-      requestId: string;
       targetName: string;
-    };
+    }
+  | { $: "return_to_lobby"; name: string; sessionId: string };
