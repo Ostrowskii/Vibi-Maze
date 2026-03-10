@@ -912,12 +912,14 @@ function render_action_panel(): string {
           <button class="btn btn-secondary btn-block" data-action="toggle-self-fox" type="button" ${self?.seat === "participant" && !is_self_master() ? "" : "disabled"}>
             ${foxButtonLabel}
           </button>
-          <button class="btn btn-secondary btn-block" data-action="open-editor" type="button" ${is_self_master() ? "" : "disabled"}>
-            Abrir editor
-          </button>
-          <button class="btn btn-primary btn-block" data-action="start-game" type="button" ${is_self_master() ? "" : "disabled"}>
-            Play
-          </button>
+          <div class="action-split">
+            <button class="btn btn-secondary btn-block" data-action="open-editor" type="button" ${is_self_master() ? "" : "disabled"}>
+              Abrir editor
+            </button>
+            <button class="btn btn-primary btn-block" data-action="start-game" type="button" ${is_self_master() ? "" : "disabled"}>
+              Play
+            </button>
+          </div>
         </div>
       </section>
     `;

@@ -18,7 +18,9 @@
 
 html,
 body {
+  height: 100%;
   min-height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -48,7 +50,9 @@ textarea {
 }
 
 #app {
+  height: 100%;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 .join-shell {
@@ -106,7 +110,13 @@ textarea {
 
 .action-stack {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+}
+
+.action-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .field {
@@ -179,11 +189,13 @@ textarea {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 360px;
   gap: 16px;
   padding: 16px;
+  overflow: hidden;
 }
 
 .left-sidebar,
@@ -192,11 +204,14 @@ textarea {
   display: grid;
   align-content: start;
   gap: 16px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .panel,
 .turn-banner {
   padding: 16px;
+  min-height: 0;
 }
 
 .turn-banner,
@@ -342,7 +357,7 @@ textarea {
 }
 
 .spacious {
-  min-height: 540px;
+  min-height: 0;
 }
 
 .editor-shell,
@@ -512,6 +527,8 @@ textarea {
   padding: 0;
   display: grid;
   gap: 8px;
+  min-height: 0;
+  overflow: auto;
 }
 
 .roster-item {
@@ -555,29 +572,31 @@ textarea {
 }
 
 .feed-panel {
-  min-height: 620px;
+  min-height: 0;
+  height: 100%;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .feed-list {
-  min-height: 280px;
-  max-height: 540px;
+  min-height: 0;
   overflow: auto;
   display: grid;
-  gap: 10px;
+  gap: 6px;
   padding-right: 4px;
 }
 
 .feed-entry {
-  padding: 9px 12px;
-  border-radius: 14px;
+  padding: 6px 10px;
+  border-radius: 12px;
   border: 1px solid rgba(17, 35, 33, 0.08);
   background: rgba(255, 255, 255, 0.78);
 }
 
 .feed-entry.system {
-  padding: 6px 10px;
-  background: rgba(246, 238, 222, 0.82);
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(246, 238, 222, 0.68);
   opacity: 0.9;
 }
 
@@ -587,15 +606,15 @@ textarea {
 
 .feed-line {
   margin: 0;
-  line-height: 1.4;
+  line-height: 1.25;
 }
 
 .feed-entry.chat .feed-line {
-  font-size: 0.93rem;
+  font-size: 0.88rem;
 }
 
 .feed-entry.system .feed-line {
-  font-size: 0.76rem;
+  font-size: 0.68rem;
   color: var(--ink-soft);
 }
 
@@ -667,6 +686,10 @@ textarea {
   .result-panel {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .action-split {
+    grid-template-columns: 1fr;
   }
 }
 
