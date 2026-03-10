@@ -208,6 +208,11 @@ textarea {
   overflow: hidden;
 }
 
+.right-column {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+}
+
 .panel,
 .turn-banner {
   padding: 16px;
@@ -623,7 +628,8 @@ textarea {
 }
 
 .feed-empty {
-  min-height: 200px;
+  min-height: 100%;
+  height: 100%;
 }
 
 .chat-form {
@@ -667,6 +673,7 @@ textarea {
   .right-column {
     grid-column: 1 / -1;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto;
   }
 }
 
@@ -677,6 +684,7 @@ textarea {
 
   .right-column {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .lobby-summary-grid {
