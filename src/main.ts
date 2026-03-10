@@ -733,7 +733,7 @@ function render_phase_content(): string {
     return `
       <section class="phase-grid">
         <div class="panel spacious">
-          ${is_self_master() ? render_master_editor() : render_waiting_lobby()}
+          ${can_edit_lobby_map() ? render_master_editor() : render_waiting_lobby()}
         </div>
         <div class="panel">
           ${render_lobby_controls()}
@@ -818,12 +818,16 @@ function render_lobby_controls(): string {
 function render_master_editor(): string {
   if (!masterState || !lastSync) return "";
   const selectedRoom = uiState.selectedRoomId ? masterState.rooms[uiState.selectedRoomId] : null;
+  const editorTitle = is_self_master() ? "Editor do mestre" : "Editor do controller";
+  const editorHelp = is_self_master()
+    ? "Arraste salas, conecte pares e monte o labirinto antes do inicio."
+    : "Sem mestre explicito, o controller atual pode editar o labirinto antes do inicio.";
   return `
     <section class="editor-shell">
       <div class="panel-header">
         <div>
-          <h2 class="section-title">Editor do mestre</h2>
-          <p class="helper">Arraste salas, conecte pares e monte o labirinto antes do inicio.</p>
+          <h2 class="section-title">${editorTitle}</h2>
+          <p class="helper">${editorHelp}</p>
         </div>
         <div class="button-row tight">
           <button class="btn btn-secondary" data-action="editor-add-room" type="button">Nova sala</button>
@@ -1209,7 +1213,6 @@ function render_maze_svg(state: FullGameState, editable: boolean): string {
         `;
       })
       .join("")}
-    ${editable ? `<rect class="drag-layer" x="0" y="0" width="${VIEWBOX_WIDTH}" height="${VIEWBOX_HEIGHT}" fill="transparent" />` : ""}
   `;
 }
 
@@ -1230,7 +1233,7 @@ function render_stickman(name: string, color: string): string {
 
 function bind_editor_canvas(): void {
   const svg = root.querySelector<SVGSVGElement>("[data-editor-svg]");
-  if (!svg || !is_self_master() || lastSync?.phase !== "lobby" || !masterState) {
+  if (!svg || !can_edit_lobby_map() || lastSync?.phase !== "lobby" || !masterState) {
     return;
   }
 
@@ -1321,6 +1324,10 @@ function can_publish_state(): boolean {
 }
 
 function can_self_manage_lobby(): boolean {
+  return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
+}
+
+function can_edit_lobby_map(): boolean {
   return Boolean(lastSync && lastSync.phase === "lobby" && is_self_controller());
 }
 
