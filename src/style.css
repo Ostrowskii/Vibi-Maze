@@ -213,6 +213,11 @@ textarea {
   align-content: stretch;
 }
 
+.phase-lobby .left-sidebar {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+}
+
 .right-column {
   grid-template-rows: auto minmax(0, 1fr);
   align-content: stretch;
@@ -293,6 +298,12 @@ textarea {
 .phase-lobby .lobby-layout > .panel {
   height: 100%;
   min-height: 0;
+}
+
+.phase-lobby .left-sidebar > .panel:last-child {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .phase-lobby .lobby-layout > .panel {
