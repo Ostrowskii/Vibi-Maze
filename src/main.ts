@@ -38,6 +38,7 @@ type UiState = {
   connectSourceRoomId: string | null;
   dragRoomId: string | null;
   editorOpen: boolean;
+  turnNotice: string;
   toast: string;
 };
 
@@ -49,6 +50,7 @@ const VIEWBOX_HEIGHT = 660;
 const SYNC_INTERVAL_MS = 200;
 const HEARTBEAT_INTERVAL_MS = 2500;
 const GAME_OVER_NOTICE_MS = 4200;
+const TURN_NOTICE_MS = 1800;
 const TRANSPORT_PACKER = { $: "String" } as const;
 const query = new URLSearchParams(window.location.search);
 
@@ -63,6 +65,7 @@ const uiState: UiState = {
   connectSourceRoomId: null,
   dragRoomId: null,
   editorOpen: false,
+  turnNotice: "",
   toast: "",
 };
 
@@ -74,9 +77,11 @@ let activeSessionId = ensure_session_id();
 let syncLoopId: number | null = null;
 let heartbeatLoopId: number | null = null;
 let returnToLobbyTimerId: number | null = null;
+let turnNoticeTimerId: number | null = null;
 let sharedState: TransportState | null = null;
 let lastSync: RoomSync | null = null;
 let lastSyncSignature = "";
+let lastTurnNoticeSignature = "";
 let editorState: FullGameState | null = null;
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -294,6 +299,7 @@ function join_room(): void {
   sharedState = null;
   editorState = null;
   clear_return_to_lobby_timer();
+  clear_turn_notice_timer();
   uiState.watchName = null;
   uiState.revealFullMap = false;
   uiState.editorOpen = false;
@@ -358,6 +364,8 @@ function on_sync(): void {
     return;
   }
 
+  maybe_show_turn_notice();
+
   const self = self_presence();
   if (self && self.seat === "spectator" && lastSync.phase !== "lobby") {
     uiState.revealFullMap = true;
@@ -389,6 +397,34 @@ function on_sync(): void {
   } else {
     clear_return_to_lobby_timer();
   }
+}
+
+function maybe_show_turn_notice(): void {
+  if (!lastSync || lastSync.phase !== "running") {
+    lastTurnNoticeSignature = "";
+    uiState.turnNotice = "";
+    clear_turn_notice_timer();
+    return;
+  }
+
+  const currentTurnName = lastSync.publicState?.currentTurnName;
+  if (!currentTurnName) {
+    return;
+  }
+
+  const signature = `${lastSync.phase}:${lastSync.publicState?.round ?? 0}:${currentTurnName}`;
+  if (signature === lastTurnNoticeSignature) {
+    return;
+  }
+
+  lastTurnNoticeSignature = signature;
+  uiState.turnNotice = `Turno de ${currentTurnName}`;
+  clear_turn_notice_timer();
+  turnNoticeTimerId = window.setTimeout(() => {
+    uiState.turnNotice = "";
+    turnNoticeTimerId = null;
+    render();
+  }, TURN_NOTICE_MS);
 }
 
 function post_transport(post: NetPost): void {
@@ -436,6 +472,7 @@ function close_transport(): void {
   game = null;
   socketState = "closed";
   clear_return_to_lobby_timer();
+  clear_turn_notice_timer();
 }
 
 function schedule_return_to_lobby(): void {
@@ -459,6 +496,13 @@ function clear_return_to_lobby_timer(): void {
   if (returnToLobbyTimerId !== null) {
     window.clearTimeout(returnToLobbyTimerId);
     returnToLobbyTimerId = null;
+  }
+}
+
+function clear_turn_notice_timer(): void {
+  if (turnNoticeTimerId !== null) {
+    window.clearTimeout(turnNoticeTimerId);
+    turnNoticeTimerId = null;
   }
 }
 
@@ -499,6 +543,7 @@ function render(): void {
         ${render_action_panel()}
         ${render_feed_panel()}
       </aside>
+      ${render_turn_notice()}
       ${render_modal()}
     </main>
   `;
@@ -557,6 +602,18 @@ function render_turn_banner(): string {
         </strong>
       </div>
     </section>
+  `;
+}
+
+function render_turn_notice(): string {
+  if (!uiState.turnNotice || !lastSync || lastSync.phase !== "running") {
+    return "";
+  }
+
+  return `
+    <div class="turn-notice" aria-live="polite">
+      <span>${escape_html(uiState.turnNotice)}</span>
+    </div>
   `;
 }
 

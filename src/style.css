@@ -208,6 +208,11 @@ textarea {
   overflow: hidden;
 }
 
+.phase-lobby .main-column {
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+}
+
 .right-column {
   grid-template-rows: auto minmax(0, 1fr);
   align-content: stretch;
@@ -281,6 +286,62 @@ textarea {
 .game-layout {
   display: grid;
   gap: 16px;
+  min-height: 0;
+}
+
+.phase-lobby .lobby-layout,
+.phase-lobby .lobby-layout > .panel {
+  height: 100%;
+  min-height: 0;
+}
+
+.phase-lobby .lobby-layout > .panel {
+  overflow: auto;
+}
+
+.turn-notice {
+  position: fixed;
+  left: 50%;
+  top: 30px;
+  transform: translateX(-50%);
+  z-index: 30;
+  pointer-events: none;
+}
+
+.turn-notice span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 240px;
+  padding: 12px 20px;
+  border-radius: 999px;
+  background: rgba(11, 25, 28, 0.92);
+  color: #fff7eb;
+  border: 1px solid rgba(255, 248, 233, 0.18);
+  box-shadow: 0 18px 40px rgba(6, 14, 13, 0.28);
+  font: 800 0.95rem/1 "JetBrains Mono", "IBM Plex Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  animation: turn-notice-fade 1.8s ease both;
+}
+
+@keyframes turn-notice-fade {
+  0% {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
 }
 
 .fog-card {
