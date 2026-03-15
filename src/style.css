@@ -762,10 +762,30 @@ textarea {
 }
 
 @media (max-width: 980px) {
+  html,
+  body {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  #app {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
   .app-shell {
     display: grid;
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1.2fr) auto minmax(0, 0.95fr) minmax(0, 1fr) auto;
+    grid-template-rows: none;
+    grid-auto-rows: auto;
+    height: auto;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: visible;
+    align-content: start;
   }
 
   .left-sidebar,
@@ -779,6 +799,7 @@ textarea {
     flex-direction: column;
     gap: 12px;
     min-height: 0;
+    overflow: visible;
   }
 
   .main-column > .turn-banner {
@@ -789,6 +810,7 @@ textarea {
   .main-column > .game-layout {
     order: 1;
     min-height: 0;
+    overflow: visible;
   }
 
   .action-panel {
@@ -811,7 +833,73 @@ textarea {
 
   .feed-panel,
   .roster-panel {
-    overflow: hidden;
+    height: auto;
+    overflow: visible;
+  }
+
+  .feed-panel {
+    grid-template-rows: auto auto auto;
+  }
+
+  .feed-list,
+  .roster {
+    overflow: visible;
+    max-height: none;
+  }
+
+  .phase-lobby .main-column,
+  .phase-lobby .left-sidebar,
+  .phase-lobby .lobby-layout,
+  .phase-lobby .lobby-layout > .panel,
+  .phase-lobby .left-sidebar > .panel:last-child {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    align-content: start;
+  }
+
+  .scene-box {
+    min-height: 0;
+    aspect-ratio: 1 / 1.05;
+  }
+
+  .room-label {
+    top: 10px;
+    max-width: calc(100% - 24px);
+    padding: 5px 10px;
+    font-size: 0.82rem;
+    text-align: center;
+  }
+
+  .exit-btn {
+    min-width: 58px;
+    padding: 6px 6px 5px;
+    border-radius: 14px;
+  }
+
+  .exit-btn small {
+    font-size: 0.62rem;
+  }
+
+  .exit-arrow {
+    font-size: 0.95rem;
+  }
+
+  .stickman-row {
+    bottom: 22px;
+    gap: 10px;
+    width: calc(100% - 16px);
+    padding: 0 8px;
+  }
+
+  .stickman {
+    min-width: 60px;
+    font-size: 0.74rem;
+  }
+
+  .stickman-svg {
+    width: 46px;
+    height: 62px;
   }
 
   .lobby-summary-grid {
@@ -842,11 +930,25 @@ textarea {
   }
 
   .scene-box {
-    min-height: 320px;
+    aspect-ratio: 1 / 1.08;
   }
 
   .stickman-row {
-    gap: 10px;
-    bottom: 28px;
+    gap: 8px;
+    bottom: 16px;
+  }
+
+  .exit-btn {
+    min-width: 52px;
+    padding: 5px 5px 4px;
+  }
+
+  .stickman {
+    min-width: 54px;
+  }
+
+  .stickman-svg {
+    width: 40px;
+    height: 54px;
   }
 }
