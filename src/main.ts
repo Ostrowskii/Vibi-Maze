@@ -189,7 +189,7 @@ root.addEventListener("click", async (event) => {
         $: "set_random_fox",
         name: lastSync.selfName,
         sessionId: activeSessionId,
-        foxName: pick_random_fox_name(lastSync.players, lastSync.masterName),
+        foxName: pick_random_fox_name(lastSync.players),
       });
       break;
     case "toggle-self-fox":
@@ -623,13 +623,12 @@ function render_turn_notice(): string {
 
 function render_left_sidebar(): string {
   if (!lastSync) return "";
-  const self = self_presence();
   const activeName = uiState.watchName ?? lastSync.selfName;
   const readyText = `${lastSync.lobbyState?.readyCount ?? 0}/${lastSync.lobbyState?.connectedParticipantCount ?? 0} ready`;
 
   return `
     <aside class="left-sidebar">
-      <section class="panel compact-stack">
+      <section class="panel compact-stack info-panel">
         <div class="mini-metric">
           <span>Ping</span>
           <strong>${Math.round(game?.ping?.() ?? 0)} ms</strong>
@@ -651,16 +650,7 @@ function render_left_sidebar(): string {
         <button class="btn btn-secondary btn-block" data-action="copy-link" type="button">Copiar link</button>
         ${
           lastSync.phase === "lobby"
-            ? `
-              <button
-                class="btn ${self?.ready ? "btn-danger" : "btn-primary"} btn-block"
-                data-action="toggle-ready"
-                type="button"
-                ${self?.seat === "participant" ? "" : "disabled"}
-              >
-                ${self?.ready ? "Remover ready" : "Ready"}
-              </button>
-            `
+            ? ""
             : `
               <div class="mini-metric">
                 <span>Visao</span>
@@ -669,7 +659,7 @@ function render_left_sidebar(): string {
             `
         }
       </section>
-      <section class="panel stack">
+      <section class="panel stack roster-panel">
         <div class="panel-header">
           <h2 class="section-title">Pessoas na sala</h2>
           <span class="tag">${lastSync.players.length}</span>
@@ -693,7 +683,7 @@ function render_roster_item(player: Presence, activeName: string): string {
     <div class="roster-copy">
       <strong>${escape_html(player.name)}</strong>
       <div class="helper">
-        ${escape_html(role_label(player.role))} • ${player.connected ? "online" : "offline"}
+        ${escape_html(player_title(player.name, player.role))} • ${player.connected ? "online" : "offline"}
       </div>
     </div>
     <span class="tag">${player.ready && lastSync?.phase === "lobby" ? "ready" : player.alive ? "vivo" : player.seat === "spectator" ? "spec" : "fora"}</span>
@@ -779,12 +769,28 @@ function render_lobby_content(): string {
 }
 
 function render_game_content(): string {
+  const self = lastSync?.fullState.players[lastSync.selfName ?? ""];
+  const showAdminMap = Boolean(lastSync && is_self_master() && self?.alive && self.seat === "participant");
+
   return `
     <section class="game-layout">
       ${lastSync?.phase === "game_over" ? render_result_panel() : ""}
-      <section class="panel spacious">
-        ${should_show_full_map() ? render_full_map_panel() : render_room_view_panel()}
-      </section>
+      ${
+        showAdminMap
+          ? `
+            <section class="panel spacious">
+              ${render_room_view_panel()}
+            </section>
+            <section class="panel spacious">
+              ${render_full_map_panel()}
+            </section>
+          `
+          : `
+            <section class="panel spacious">
+              ${should_show_full_map() ? render_full_map_panel() : render_room_view_panel()}
+            </section>
+          `
+      }
     </section>
   `;
 }
@@ -849,7 +855,7 @@ function render_full_map_legend(): string {
           <div class="legend-chip">
             <span class="legend-color" style="background:${player.color}"></span>
             <strong>${escape_html(player.name)}</strong>
-            <span>${escape_html(role_label(player.role))}</span>
+            <span>${escape_html(player_title(player.name, player.role))}</span>
           </div>
         `)
         .join("")}
@@ -980,7 +986,7 @@ function render_action_panel(): string {
 
   if (lastSync.phase === "lobby") {
     return `
-      <section class="panel stack">
+      <section class="panel stack action-panel">
         <div class="panel-header">
           <h2 class="section-title">Acoes do lobby</h2>
           <span class="tag">${lastSync.lobbyState?.allConnectedReady ? "auto start" : "manual"}</span>
@@ -989,13 +995,21 @@ function render_action_panel(): string {
           <button class="btn ${is_self_master() ? "btn-danger" : "btn-primary"} btn-block" data-action="claim-master" type="button">
             ${is_self_master() ? "Deixar de ser mestre" : "Virar mestre"}
           </button>
+          <button
+            class="btn ${self?.ready ? "btn-danger" : "btn-primary"} btn-block"
+            data-action="toggle-ready"
+            type="button"
+            ${self?.seat === "participant" ? "" : "disabled"}
+          >
+            ${self?.ready ? "Remover ready" : "Ready"}
+          </button>
           <button class="btn btn-secondary btn-block" data-action="random-map" type="button" ${self?.seat === "participant" ? "" : "disabled"}>
             Mapa aleatorio
           </button>
           <button class="btn btn-secondary btn-block" data-action="shuffle-fox" type="button" ${self?.seat === "participant" ? "" : "disabled"}>
             Sortear raposa
           </button>
-          <button class="btn btn-secondary btn-block" data-action="toggle-self-fox" type="button" ${self?.seat === "participant" && !is_self_master() ? "" : "disabled"}>
+          <button class="btn btn-secondary btn-block" data-action="toggle-self-fox" type="button" ${self?.seat === "participant" ? "" : "disabled"}>
             ${foxButtonLabel}
           </button>
           <div class="action-split">
@@ -1012,7 +1026,7 @@ function render_action_panel(): string {
   }
 
   return `
-    <section class="panel stack">
+    <section class="panel stack action-panel">
       <div class="panel-header">
         <h2 class="section-title">Partida</h2>
         <span class="tag">${lastSync.publicState?.round ?? 0}</span>
@@ -1438,6 +1452,14 @@ function self_presence(): Presence | null {
 
 function is_self_master(): boolean {
   return Boolean(lastSync && lastSync.masterName === lastSync.selfName);
+}
+
+function player_title(name: string, role: string): string {
+  const base = role_label(role);
+  if (lastSync?.masterName === name) {
+    return `${base} • mestre`;
+  }
+  return base;
 }
 
 function role_label(role: string): string {

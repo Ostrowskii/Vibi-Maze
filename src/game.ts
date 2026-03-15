@@ -95,11 +95,10 @@ function connected_lobby_players(roster: Presence[]): Presence[] {
   return roster.filter((player) => player.seat === "participant" && player.connected);
 }
 
-function active_game_players(roster: Presence[], masterName: string | null): Presence[] {
+function active_game_players(roster: Presence[]): Presence[] {
   return roster.filter((player) => (
     player.seat === "participant" &&
-    player.connected &&
-    player.name !== masterName
+    player.connected
   ));
 }
 
@@ -205,10 +204,6 @@ function roster_list(state: TransportState): Presence[] {
 }
 
 function sync_lobby_roles(state: FullGameState): void {
-  if (state.masterName && state.foxName === state.masterName) {
-    state.foxName = null;
-  }
-
   for (const player of Object.values(state.players)) {
     player.alive = false;
     player.locationRoomId = null;
@@ -218,13 +213,8 @@ function sync_lobby_roles(state: FullGameState): void {
       player.hasFullInfo = true;
       continue;
     }
-    if (state.masterName === player.name) {
-      player.role = "master";
-      player.hasFullInfo = true;
-      continue;
-    }
     player.role = state.foxName === player.name ? "fox" : "hen";
-    player.hasFullInfo = false;
+    player.hasFullInfo = state.masterName === player.name;
   }
 }
 
@@ -280,7 +270,7 @@ function apply_random_map(state: FullGameState, seed: number): void {
 
 function set_selected_fox(state: FullGameState, foxName: string | null): void {
   const player = foxName ? state.players[foxName] : null;
-  if (!player || player.seat !== "participant" || player.role === "master") {
+  if (!player || player.seat !== "participant") {
     state.foxName = null;
   } else {
     state.foxName = foxName;
@@ -293,7 +283,7 @@ function set_selected_fox(state: FullGameState, foxName: string | null): void {
 function start_game_with_seed(base: TransportState, seed: number, reason: string): TransportState {
   const next = clone_state(base);
   const roster = roster_list(next);
-  const active = active_game_players(roster, next.fullState.masterName);
+  const active = active_game_players(roster);
 
   if (active.length < 2 || active.length > 8) {
     return base;
@@ -327,15 +317,6 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
       continue;
     }
 
-    if (player.name === next.fullState.masterName) {
-      player.role = "master";
-      player.alive = false;
-      player.locationRoomId = null;
-      player.hasFullInfo = true;
-      player.ready = false;
-      continue;
-    }
-
     const activeIndex = orderedActive.findIndex((presence) => presence.name === player.name);
     if (activeIndex === -1) {
       player.role = "hen";
@@ -349,7 +330,7 @@ function start_game_with_seed(base: TransportState, seed: number, reason: string
     player.role = player.name === foxName ? "fox" : "hen";
     player.alive = true;
     player.locationRoomId = shuffledRooms[activeIndex % shuffledRooms.length] ?? roomIds[0] ?? null;
-    player.hasFullInfo = false;
+    player.hasFullInfo = player.name === next.fullState.masterName;
     player.ready = false;
   }
 
@@ -382,14 +363,12 @@ function reset_to_lobby_state(base: TransportState, actorName: string | null, te
     if (player.seat === "spectator") {
       player.role = "spectator";
       player.hasFullInfo = true;
-    } else if (next.fullState.masterName === player.name) {
-      player.role = "master";
-      player.hasFullInfo = true;
     } else {
       player.role = "hen";
-      player.hasFullInfo = false;
+      player.hasFullInfo = next.fullState.masterName === player.name;
     }
   }
+  sync_lobby_roles(next.fullState);
   append_system_entry(next.fullState, actorName, text);
   return next;
 }
@@ -523,11 +502,10 @@ export function pick_random_saved_maze_seed(): number {
   return SAVED_MAZE_SEEDS[Math.floor(Math.random() * SAVED_MAZE_SEEDS.length)] ?? SAVED_MAZE_SEEDS[0];
 }
 
-export function pick_random_fox_name(players: Presence[], masterName: string | null): string | null {
+export function pick_random_fox_name(players: Presence[]): string | null {
   const candidates = players.filter((player) => (
     player.seat === "participant" &&
-    player.connected &&
-    player.name !== masterName
+    player.connected
   ));
   if (candidates.length === 0) {
     return null;
@@ -961,7 +939,7 @@ function handle_toggle_self_fox_post(state: TransportState, post: Extract<NetPos
     return state;
   }
   const player = state.fullState.players[post.name];
-  if (!player || player.seat !== "participant" || player.role === "master") {
+  if (!player || player.seat !== "participant") {
     return state;
   }
   const next = clone_state(state);
