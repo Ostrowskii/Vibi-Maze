@@ -547,6 +547,7 @@ textarea {
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 2;
   padding: 6px 12px;
   border-radius: 999px;
   background: rgba(255, 248, 233, 0.92);
@@ -555,6 +556,7 @@ textarea {
 
 .exit-btn {
   position: absolute;
+  z-index: 3;
   transform: translate(-50%, -50%);
   border: 1px solid rgba(255, 248, 233, 0.28);
   border-radius: 16px;
@@ -576,6 +578,8 @@ textarea {
   position: absolute;
   left: 50%;
   bottom: 46px;
+  z-index: 1;
+  pointer-events: none;
   transform: translateX(-50%);
   display: flex;
   flex-wrap: wrap;
@@ -590,12 +594,13 @@ textarea {
   display: grid;
   gap: 4px;
   justify-items: center;
-  min-width: 82px;
+  min-width: 70px;
+  pointer-events: none;
 }
 
 .stickman-svg {
-  width: 62px;
-  height: 82px;
+  width: 52px;
+  height: 70px;
 }
 
 .roster {
@@ -893,13 +898,13 @@ textarea {
   }
 
   .stickman {
-    min-width: 60px;
+    min-width: 54px;
     font-size: 0.74rem;
   }
 
   .stickman-svg {
-    width: 46px;
-    height: 62px;
+    width: 40px;
+    height: 54px;
   }
 
   .lobby-summary-grid {
@@ -944,11 +949,11 @@ textarea {
   }
 
   .stickman {
-    min-width: 54px;
+    min-width: 48px;
   }
 
   .stickman-svg {
-    width: 40px;
-    height: 54px;
+    width: 34px;
+    height: 46px;
   }
 }
