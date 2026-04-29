@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Por padrao o cliente usa o servidor oficial do `vibinet`.
+Por padrao o cliente usa `wss://net.vibistudiotest.site`.
 
 ### Query params uteis
 

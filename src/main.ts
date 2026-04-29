@@ -1,5 +1,5 @@
 import "./style.css";
-import { OFFICIAL_SERVER_URL, VibiNet } from "vibinet";
+import { VibiNet } from "vibinet";
 import {
   apply_kill_choice,
   apply_map_edit,
@@ -51,6 +51,7 @@ const SYNC_INTERVAL_MS = 200;
 const HEARTBEAT_INTERVAL_MS = 2500;
 const GAME_OVER_NOTICE_MS = 4200;
 const TURN_NOTICE_MS = 1800;
+const DEFAULT_WS_URL = "wss://net.vibistudiotest.site";
 const TRANSPORT_PACKER = { $: "String" } as const;
 const query = new URLSearchParams(window.location.search);
 
@@ -320,7 +321,7 @@ function join_room(): void {
     packer: typeof TRANSPORT_PACKER;
     tick_rate: number;
     tolerance: number;
-    server?: string;
+    server: string;
   } = {
     room,
     initial: create_transport_state(),
@@ -329,11 +330,8 @@ function join_room(): void {
     packer: TRANSPORT_PACKER,
     tick_rate: 6,
     tolerance: 300,
+    server: resolve_ws_url(),
   };
-  const explicitServer = resolve_ws_url();
-  if (explicitServer !== OFFICIAL_SERVER_URL) {
-    options.server = explicitServer;
-  }
 
   game = new VibiNet.game(options);
   game.on_sync(() => {
@@ -1529,7 +1527,7 @@ function resolve_ws_url(): string {
   if (explicit) {
     return explicit;
   }
-  return OFFICIAL_SERVER_URL;
+  return DEFAULT_WS_URL;
 }
 
 async function copy_room_link(): Promise<void> {
